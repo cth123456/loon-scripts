@@ -1,6 +1,6 @@
 /* eslint-disable */
 /**
- * AgentRouter 自动签到 —— Loon 版（cron 定时 + generic 手动入口）
+ * AgentRouter 自动签到 —— Loon 版（单一 cron 入口，可手动运行）
  *
  * 原理：本站"签到"= 每日完成一次登录。
  *   1) POST /api/user/login {username: 邮箱, password: 密码}
@@ -18,9 +18,9 @@
  *       （兼容旧格式每项写 {"name":"...","email":"...","password":"..."}）
  *   - 插件输入「单账号[邮箱]」和「单账号[密码]」：分开填写
  *   - 兼容插件旧输入「单账号[邮箱和密码]」：`邮箱#密码`
- *   - argument="manual" 绕过小时过滤；"scheduled" 按小时过滤
+ *   - 旧 argument="manual" / "scheduled" 忽略，不作为账号解析
  *   - 插件输入「站点域名[可留空]」（可选）：覆盖站点域名，默认 https://agentrouter.org
- *   - 插件输入「签到时间点[可留空]」（可选）：如 "9,15,21"，只在匹配的小时签到
+ *   - 调度只由插件 cron 控制；手动运行直接执行，不读取旧小时配置
  *   旧版英文键（AGENTROUTER_ACCOUNT 等）仍能读，并会自动迁移到中文键。
  *
  * 说明：
@@ -41,7 +41,7 @@ const RUN_BUDGET = 110000; // 留出通知与 $done 的余量（插件 timeout=1
 
 // 版本号：手动触发一次后，在 Loon 日志里看这行就能确认当前跑的是哪一版。
 // 更新脚本时同步递增，并同步更新 AgentRouter.checkin.plugin 的 #!desc。
-const SCRIPT_VERSION = "1.5.0";
+const SCRIPT_VERSION = "1.5.1";
 
 const DEFAULT_BASE_URL = "https://agentrouter.org";
 
@@ -53,9 +53,6 @@ const FIELD_ACCOUNTS = "多账号[JSON数组]";
 const FIELD_BASE_URL = "站点域名[可留空]";
 const FIELD_EMAIL = "单账号[邮箱]";
 const FIELD_PASSWORD = "单账号[密码]";
-// cron 每小时唤起，由此字段限定小时；manual 入口不受限制。
-// 保留旧键与空值行为，避免覆盖用户已有小时配置。
-const FIELD_RUN_HOURS = "签到时间点[可留空]";
 // 可选：指定这些请求走哪个节点/策略组（Loon $httpClient 的 node 参数）。
 // 填 DIRECT 表示直连，也可填已有策略组名；不能保证解决人机验证。
 const FIELD_NODE = "指定节点或策略组[可留空]";
@@ -65,7 +62,6 @@ const FIELD_NODE = "指定节点或策略组[可留空]";
 const LEGACY_ACCOUNT = "AGENTROUTER_ACCOUNT";
 const LEGACY_ACCOUNTS = "AGENTROUTER_ACCOUNTS";
 const LEGACY_BASE_URL = "AGENTROUTER_BASE_URL";
-const LEGACY_RUN_HOURS = "AGENTROUTER_RUN_HOURS";
 
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
@@ -173,44 +169,6 @@ function extractQuota(payload) {
     }
   }
   return null;
-}
-
-// 解析「签到时间点」："9,15,21" 或 "9-11"（也支持跨午夜 "22-2"）。
-// 返回 0-23 的整数数组；无法解析的片段忽略。返回空数组表示"不做小时限制"。
-function parseRunHours(raw) {
-  var found = [];
-  var parts = String(raw == null ? "" : raw).split(",");
-  for (var i = 0; i < parts.length; i++) {
-    var p = parts[i].trim();
-    if (!p) continue;
-    var m = p.match(/^(\d{1,2})\s*-\s*(\d{1,2})$/);
-    if (m) {
-      var a = parseInt(m[1], 10);
-      var b = parseInt(m[2], 10);
-      if (a > 23 || b > 23) continue;
-      if (a <= b) {
-        for (var h = a; h <= b; h++) found.push(h);
-      } else {
-        for (var h2 = a; h2 <= 23; h2++) found.push(h2);
-        for (var h3 = 0; h3 <= b; h3++) found.push(h3);
-      }
-      continue;
-    }
-    if (/^\d{1,2}$/.test(p)) {
-      var v = parseInt(p, 10);
-      if (v >= 0 && v <= 23) found.push(v);
-    }
-  }
-  var out = [];
-  for (var j = 0; j < found.length; j++) {
-    if (out.indexOf(found[j]) < 0) out.push(found[j]);
-  }
-  return out;
-}
-
-function shouldRunNow(hours, hour) {
-  if (!hours || !hours.length) return true;
-  return hours.indexOf(hour) >= 0;
 }
 
 // ------------------------------------------------- BASE_URL 安全校验
@@ -502,7 +460,7 @@ function collectAccounts() {
     }
   }
 
-  log("未检测到任何配置: 请在插件里填写「" + FIELD_ACCOUNT + "」(格式 邮箱#密码)");
+  log("未检测到任何配置: 请在插件里填写「" + FIELD_EMAIL + "」和「" + FIELD_PASSWORD + "」");
   return [];
 }
 
@@ -660,16 +618,7 @@ async function passwordLogin(base, acc, node, runDeadline) {
 async function main() {
   log("AgentRouter 自动签到启动 (Loon) v" + SCRIPT_VERSION);
 
-  var runHours = parseRunHours(readField(FIELD_RUN_HOURS, LEGACY_RUN_HOURS));
-  var manual = getArgument().trim() === "manual";
-  log(manual ? "手动入口：绕过小时过滤" : "定时入口：按配置小时过滤（含手动点击 cron）");
-  if (!manual && runHours.length) {
-    var hour = new Date().getHours();
-    if (!shouldRunNow(runHours, hour)) {
-      log("当前 " + hour + " 点不在「" + FIELD_RUN_HOURS + "」(" + runHours.join(",") + ") 内，本次跳过");
-      return;
-    }
-  }
+  log("单一入口：按插件 cron 调度；手动运行直接执行（忽略旧小时配置）");
 
   var base = (readField(FIELD_BASE_URL, LEGACY_BASE_URL) || DEFAULT_BASE_URL).trim().replace(/\/+$/, "");
   var guard = validateBaseUrl(base);
@@ -755,8 +704,6 @@ if (typeof module !== "undefined" && module.exports) {
     parseAccount: parseAccount,
     extractQuota: extractQuota,
     humanAgo: humanAgo,
-    parseRunHours: parseRunHours,
-    shouldRunNow: shouldRunNow,
     readField: readField,
     clip: clip,
     htmlTitle: htmlTitle,
@@ -769,7 +716,6 @@ if (typeof module !== "undefined" && module.exports) {
     FIELD_ACCOUNT: FIELD_ACCOUNT,
     FIELD_ACCOUNTS: FIELD_ACCOUNTS,
     FIELD_BASE_URL: FIELD_BASE_URL,
-    FIELD_RUN_HOURS: FIELD_RUN_HOURS,
     FIELD_NODE: FIELD_NODE,
     normalizeAccountsArray: normalizeAccountsArray,
     collectAccounts: collectAccounts

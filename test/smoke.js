@@ -19,7 +19,7 @@ const F = {
   ACCOUNT: checkin.FIELD_ACCOUNT,
   ACCOUNTS: checkin.FIELD_ACCOUNTS,
   BASE_URL: checkin.FIELD_BASE_URL,
-  RUN_HOURS: checkin.FIELD_RUN_HOURS,
+  RUN_HOURS: "签到时间点[可留空]", // 历史持久化键，仅供回归测试
   NODE: checkin.FIELD_NODE,
 };
 const state = { logs: [], notifications: [], done: false, requests: [], store: {} };
@@ -365,9 +365,9 @@ const CHECKIN_CASES = [
     expect: { title: "[AgentRouter] 签到失败", content: ["未检测到账号配置"] },
   },
   {
-    name: "时间次数：签到时间点=9,15,21 且当前 10 点 → 跳过、不请求",
-    spec: { store: { [F.ACCOUNT]: "a@x.com#pwdA", [F.RUN_HOURS]: "9,15,21" }, hour: 10, responder: {} },
-    expect: { noNotify: true, logs: ["不在「" + F.RUN_HOURS + "」"], noRequests: true },
+    name: "旧中文小时未命中仍执行",
+    spec: { store: { [F.ACCOUNT]: "a@x.com#pwdA", [F.RUN_HOURS]: "9,15,21" }, hour: 10, responder: { post: () => loginOk({ checked_in: false }) } },
+    expect: { title: "[AgentRouter] 签到汇总", postCount: 1 },
   },
   {
     name: "时间次数：签到时间点=9,15,21 且当前 15 点 → 执行",
@@ -433,10 +433,10 @@ const CHECKIN_CASES = [
   },
 ];
 
-// 1.5.0 回归场景，所有 HTTP 均为 stub。
+// 1.5.1 回归场景，所有 HTTP 均为 stub。
 const accountStore = { [F.EMAIL]: "a#tag@example.com", [F.PASSWORD]: " p#a#ss " };
 const warm = () => ({ resp: { status: 200, headers: {} }, data: "<html>login</html>" });
-for (const [argument, hour, run] of [["manual", 18, true], ["scheduled", 18, false], ["scheduled", 3, true], ["scheduled", 5, true], ["scheduled", 10, true]]) {
+for (const [argument, hour] of [["", 18], ["manual", 18], ["scheduled", 18], ["", 3], ["", 5], ["", 10]]) {
   CHECKIN_CASES.push({
     name: `${argument} ${hour}点，配置3,5,10`,
     spec: { argument, hour, store: { ...accountStore, [F.RUN_HOURS]: "3,5,10" }, responder: {
@@ -446,7 +446,7 @@ for (const [argument, hour, run] of [["manual", 18, true], ["scheduled", 18, fal
         return loginOk({ checked_in: false });
       },
     } },
-    expect: run ? { title: "[AgentRouter] 签到汇总", postCount: 1 } : { noNotify: true, noRequests: true },
+    expect: { title: "[AgentRouter] 签到汇总", postCount: 1 },
   });
 }
 for (const [name, seq, expected] of [
@@ -462,7 +462,7 @@ for (const [name, seq, expected] of [
 }
 CHECKIN_CASES.push(
   { name: "普通预热HTML含captcha组件不误判挑战", spec: { store: accountStore, responder: { get: () => ({ resp: { status: 200, headers: {} }, data: '<html><script src="captcha-widget.js"></script></html>' }), post: () => loginOk({ checked_in: false }) } }, expect: { postCount: 1, content: ["checked_in=false"] } },
-  { name: "旧英文小时配置保留且scheduled未命中", spec: { argument: "scheduled", hour: 18, store: { ...accountStore, AGENTROUTER_RUN_HOURS: "3,5,10" } }, expect: { noRequests: true, storeHas: { [F.RUN_HOURS]: "3,5,10" } } },
+  { name: "旧英文小时值不影响18点执行且不迁移", spec: { argument: "scheduled", hour: 18, store: { ...accountStore, AGENTROUTER_RUN_HOURS: "3,5,10" }, responder: { get: warm, post: () => loginOk({ checked_in: false }) } }, expect: { postCount: 1, storeHas: { AGENTROUTER_RUN_HOURS: "3,5,10", [F.RUN_HOURS]: undefined } } },
   { name: "分开凭据优先于旧值", spec: { store: { ...accountStore, [F.ACCOUNT]: "old@example.com#old" }, responder: { get: warm, post: p => {
     assert.strictEqual(JSON.parse(p.body).password, " p#a#ss "); return loginOk({ checked_in: false });
   } } }, expect: { postCount: 1 } },
@@ -592,18 +592,6 @@ function unitTests() {
   t.push(["checkin SCRIPT_VERSION 为 x.y.z", /^\d+\.\d+\.\d+$/.test(checkin.SCRIPT_VERSION)]);
   t.push(["watch SCRIPT_VERSION 为 x.y.z", /^\d+\.\d+\.\d+$/.test(watch.SCRIPT_VERSION)]);
 
-  const ph = checkin.parseRunHours;
-  t.push(["parseRunHours 列表", JSON.stringify(ph("9,15,21")) === JSON.stringify([9, 15, 21])]);
-  t.push(["parseRunHours 区间", JSON.stringify(ph("9-11")) === JSON.stringify([9, 10, 11])]);
-  t.push(["parseRunHours 跨午夜", JSON.stringify(ph("22-2")) === JSON.stringify([22, 23, 0, 1, 2])]);
-  t.push(["parseRunHours 去重", JSON.stringify(ph("9,9,10")) === JSON.stringify([9, 10])]);
-  t.push(["parseRunHours 空格容错", JSON.stringify(ph(" 9 , 15 ")) === JSON.stringify([9, 15])]);
-  t.push(["parseRunHours 非法项忽略", JSON.stringify(ph("9,abc,99")) === JSON.stringify([9])]);
-  t.push(["parseRunHours 空字符串 → []", ph("").length === 0]);
-  t.push(["parseRunHours null → []", ph(null).length === 0]);
-  t.push(["shouldRunNow 空列表 → 总是执行", checkin.shouldRunNow([], 5) === true]);
-  t.push(["shouldRunNow 命中", checkin.shouldRunNow([9, 15], 15) === true]);
-  t.push(["shouldRunNow 未命中", checkin.shouldRunNow([9, 15], 12) === false]);
 
   const pc = watch.parseLatestCommit;
   t.push(["parseLatestCommit 取首条 entry 的 SHA", pc(ATOM("deadbeef1234", "msg here", "2026-05-05T00:00:00Z")).shortSha === "deadbeef"]);
@@ -617,7 +605,7 @@ function unitTests() {
   t.push(["compareUrl 缺参数退回 commits 页", /\/commits\/main$/.test(watch.compareUrl("", "bbb"))]);
 
   // 输入项名称：必须是中文（用户能看懂），且不能含 `#`（会截断插件 #! 行）
-  const fields = [checkin.FIELD_ACCOUNT, checkin.FIELD_ACCOUNTS, checkin.FIELD_BASE_URL, checkin.FIELD_RUN_HOURS];
+  const fields = [checkin.FIELD_EMAIL, checkin.FIELD_PASSWORD, checkin.FIELD_ACCOUNTS, checkin.FIELD_BASE_URL];
   t.push(["输入项名称含中文字符", fields.every((f) => /[\u4e00-\u9fa5]/.test(f))]);
   t.push(["输入项名称不含 # ", fields.every((f) => f.indexOf("#") < 0)]);
   t.push(["输入项名称互不相同", new Set(fields).size === fields.length]);
@@ -663,8 +651,8 @@ function unitTests() {
     .replace("（jsDelivr 镜像版）", "")
     .replaceAll("https://cdn.jsdelivr.net/gh/cth123456/loon-scripts@main/", "https://raw.githubusercontent.com/cth123456/loon-scripts/main/");
   t.push(["两份插件功能完全一致", plugin === mirror]);
-  t.push(["插件每小时 scheduled 与 generic manual", /cron "0 \* \* \* \*"[^\n]+argument="scheduled"/.test(plugin) && /generic [^\n]+argument="manual"/.test(plugin)]);
-  t.push(["插件与脚本版本1.5.0一致", checkin.SCRIPT_VERSION === "1.5.0" && plugin.includes("v1.5.0")]);
+  t.push(["插件每天3/5/10 cron且无generic", /cron "0 3,5,10 \* \* \*"/.test(plugin) && !/generic /.test(plugin)]);
+  t.push(["插件与脚本版本1.5.1一致", checkin.SCRIPT_VERSION === "1.5.1" && plugin.includes("v1.5.1")]);
   t.push(["插件包含分开的中文输入", plugin.includes("#!input = " + F.EMAIL) && plugin.includes("#!input = " + F.PASSWORD)]);
   t.push(["Cookie同名更新保留其他值", checkin.mergeCookies("sid=1; waf=a", "waf=b; auth=x=y") === "sid=1; waf=b; auth=x=y"]);
   t.push(["Cookie Expires逗号不破坏分割", ec({ "set-cookie": "sid=1; Expires=Wed, 09 Jun 2027 10:18:14 GMT, waf=b; Path=/" }) === "sid=1; waf=b"]);

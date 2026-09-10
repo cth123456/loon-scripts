@@ -1,6 +1,6 @@
 # loon-scripts
 
-个人 Loon 脚本集合。当前 AgentRouter 版本：**1.5.0**。
+个人 Loon 脚本集合。当前 AgentRouter 版本：**1.5.1**。
 
 | 脚本 | 说明 |
 | --- | --- |
@@ -15,65 +15,23 @@
 https://raw.githubusercontent.com/cth123456/loon-scripts/main/AgentRouter.checkin.plugin
 ```
 
-安装后创建每小时签到 cron、独立手动 generic、每周一 10 点上游检查任务。升级时需要更新**插件和脚本**，只更新 JS 不会改变旧 cron 或增加输入项、手动入口。不要同时启用两份签到插件，否则可能重复执行。
+插件只有一个签到 cron 入口；每天 03:00、05:00、10:00 运行，手动点击该 cron 的运行按钮也直接执行。移除旧合填和小时输入；旧小时值不再影响运行，但脚本继续读取旧持久化账号配置；不要同时启用两份签到插件。
 
 | 插件中文标签 | 填写说明 |
 | --- | --- |
-| `单账号[邮箱]` | 新单账号邮箱，与密码分开输入 |
+| `单账号[邮箱]` | 新单账号邮箱 |
 | `单账号[密码]` | 密码原样传递，支持 `#` 及首尾空格 |
-| `单账号[邮箱和密码]` | 仅为旧配置兼容保留，新用户留空；旧格式为 `邮箱#密码`，按第一个 `#` 分隔 |
-| `多账号[JSON数组]` | 可选，优先于单账号，格式见下 |
-| `签到时间点[可留空]` | 如 `3,5,10`；保留旧值，不自动改写 |
-| `指定节点或策略组[可留空]` | 可选，原样作为请求的 `node` 参数；`DIRECT` 表示直连，不保证能解决验证或网络问题 |
-| `站点域名[可留空]` | 默认 `https://agentrouter.org`；只填写自己确认可信的站点 |
+| `多账号[JSON数组]` | 可选，格式：`[{"name":"甲","account":"a@example.com#pwdA"}]` |
+| `指定节点或策略组[可留空]` | 可选，原样作为请求的 `node` 参数 |
+| `站点域名[可留空]` | 默认 `https://agentrouter.org` |
 
-多账号支持两种格式：
-
-```json
-[{"name":"甲","account":"a@example.com#pwdA"},{"name":"乙","email":"b@example.com","password":"pwdB"}]
-```
-
-配置优先级：旧凭据 `argument` > 多账号 JSON > 分开的单账号邮箱与密码 > 旧单账号组合字段。新单账号任一字段非空时必须两项同时填写，不会悄悄回退到旧账号。旧英文 `AGENTROUTER_ACCOUNT`、`AGENTROUTER_ACCOUNTS`、`AGENTROUTER_BASE_URL`、`AGENTROUTER_RUN_HOURS` 仍兼容读取并迁移到对应旧中文键。
-
-`argument="manual"` 和 `argument="scheduled"` 是运行模式，不会作为账号解析；旧 `邮箱#密码` 或 JSON argument 仍能使用，且维持小时过滤。分开输入支持邮箱或密码本身包含 `#`；旧组合格式不能无歧义表达含 `#` 的邮箱。
+账号优先级：旧凭据 argument > 多账号 JSON > 分开的邮箱与密码 > 旧单账号合填持久化值。分开输入任一项非空时必须两项齐全，不会回退旧账号。旧英文账号/站点键和旧多账号格式仍兼容；旧英文小时键不再读取或迁移。验证码/人机验证仍未解决，脚本不绕过验证。
 
 ## 定时与手动运行
 
-- **定时入口**：`cron "0 * * * *"` 每小时唤起，`argument="scheduled"` 根据设备本地小时检查 `签到时间点[可留空]`。不匹配时不发请求、不发通知。
-- **手动入口**：在 Loon 内手动触发 **AgentRouter手动签到**（generic，`argument="manual"`），无论几点都绕过小时过滤；仍执行凭据、安全和预算检查。
-- **点击 cron 自带的运行按钮仍是定时入口**：argument 不会因此改变，仍受小时过滤。不能用它验证“手动绕过”。
-
-例如填 `3,5,10`，自动在本地 03:00、05:00、10:00 执行；18 点自动或手动点击 cron 会跳过，18 点触发独立 generic 会立即执行。
-
-| 小时配置 | 定时行为 |
-| --- | --- |
-| `3,5,10` | 只在 3、5、10 点执行 |
-| `9` | 每天 9 点执行，建议只需每日签到时使用 |
-| `9-18` | 9 到 18 点的整点 |
-| `22-2` | 跨午夜 22、23、0、1、2 点 |
-| 留空 | 保留历史语义，每小时执行；不会自动填入默认小时 |
-
-解析器保留原有行为：忽略非法片段；若全部非法，结果与留空相同，不做小时限制。请核对输入，避免不必要的频繁请求。系统休眠、后台调度等可能影响实际执行；脚本不补跑错过的小时。
-
-### 官方 API 核实与边界
-
-2026-09-10 查阅 Loon 官方文档：
-
-- [脚本配置](https://nsloon.app/docs/Script/)：cron、generic 和 `argument="..."` 语法；generic 在 App 内手动触发；脚本行 timeout 单位为秒。
-- [Script API](https://nsloon.app/docs/Script/script_api)：`$argument`、`$script.name`、`$script.startTime`，以及 `$environment.params` 的节点/策略上下文；HTTP timeout 单位为毫秒。
-- [官方仓库脚本类型示例](https://github.com/Loon0x00/LoonExampleConfig/blob/master/Script/script_README.md)：generic 手动入口及 cron 示例。
-
-上述文档**未提供可靠识别“手动点击 cron / 自动 cron”的字段**，所以本项目显式区分入口参数，不编造 `$environment` 运行类型，也不按脚本名猜测。
-
-沿用旧式 `#!input` 中文标签，名称同时是本地存储键。不同平台的 build 编号不能直接比较，**不能仅凭 Mac build 81 与 iOS build 662/733 的数字大小断言特性不可用**。本版本未在用户的 Loon 真机上验证 generic 展示位置、参数传递和客户端版本兼容性。
-
-如自行配置，以下两行读取已保存的插件输入；没有保存凭据时不会登录：
-
-```ini
-[Script]
-cron "0 * * * *" script-path=https://raw.githubusercontent.com/cth123456/loon-scripts/main/agentrouter-checkin.js, tag=AgentRouter签到, enable=true, timeout=120, argument="scheduled"
-generic script-path=https://raw.githubusercontent.com/cth123456/loon-scripts/main/agentrouter-checkin.js, tag=AgentRouter手动签到, timeout=120, argument="manual"
-```
+- 唯一签到调度：`cron "0 3,5,10 * * *"`。
+- 手动点击签到 cron 的运行按钮直接执行，不读取或判断旧的小时配置。
+- `upstream-watch.js` 保留原有独立的每周一 10:00 上游检查 cron。
 
 ## 登录、重试与安全边界
 
@@ -119,14 +77,14 @@ node --check test/smoke.js
 node test/smoke.js
 ```
 
-测试 stub 掉 Loon HTTP、存储、通知、时钟，不发真实请求。覆盖成功路径、手动/定时小时过滤、分开及旧凭据、重试上限、停止条件、Cookie 合并与预算，以及原有上游检查用例。
+测试 stub 掉 Loon HTTP、存储、通知、时钟，不发真实请求。覆盖成功路径、18 点直接运行且旧小时不影响执行、分开及旧凭据、重试上限、停止条件、Cookie 合并与预算，以及原有上游检查用例。
 
-更新插件后，运行 **AgentRouter手动签到**，查看日志 `AgentRouter 自动签到启动 (Loon) v1.5.0`。远程脚本及客户端缓存可能延迟更新，不承诺每次执行都实时下载新版；必要时使用客户端更新操作再核对版本。本地代码未发布前，远程 main 链接不会包含本次修改。
+升级需同时更新插件和脚本；只更新 JS 不会改变旧 cron 或移除旧入口。更新后，手动运行 **AgentRouter签到** cron，查看日志 `AgentRouter 自动签到启动 (Loon) v1.5.1`。远程脚本及客户端缓存可能延迟更新，不承诺每次执行都实时下载新版；必要时使用客户端更新操作再核对版本。本地代码未发布前，远程 main 链接不会包含本次修改。
 
 已有镜像插件仅同步功能配置，不作为本次安装推荐；其缓存时效不作未经核实的固定时长承诺。
 
 ## 已知限制
 
 - 本次仅完成离线逻辑验证，未验证真机“登录 → 额度发放 → 日志确认”全链路。
-- 没有可靠的内建手动 cron 检测；必须使用独立 generic 才能绕过小时过滤。
+- 验证码/人机验证仍未解决，不绕过验证；尚未进行真机登录链路验证。
 - 不提供验证码绕过、无限重试或网络可达性保证。
