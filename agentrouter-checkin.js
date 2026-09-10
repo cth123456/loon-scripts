@@ -22,7 +22,8 @@
  *   旧版英文键（AGENTROUTER_ACCOUNT 等）仍能读，并会自动迁移到中文键。
  *
  * 说明：
- *   - session cookie 由 Loon 的 auto-cookie 在同一 host 内自动沿用，无需手动处理。
+ *   - cookie 由脚本自己管理（先 GET /login 拿 WAF 下发的 cookie，再显式回传），
+ *     不依赖 Loon 的 auto-cookie，因此旧版 Loon 也能正常工作。
  *   - 重复运行不会重复发额度，服务端按天去重。
  *   - 为安全起见，BASE_URL 只允许 http/https 且拒绝本机/内网/保留地址。
  */
@@ -35,7 +36,7 @@ const TIMEOUT = 20000;
 
 // 版本号：手动触发一次后，在 Loon 日志里看这行就能确认当前跑的是哪一版。
 // 更新脚本时同步递增，并同步更新 AgentRouter.checkin.plugin 的 #!desc。
-const SCRIPT_VERSION = "1.2.0";
+const SCRIPT_VERSION = "1.3.0";
 
 const DEFAULT_BASE_URL = "https://agentrouter.org";
 
@@ -59,6 +60,20 @@ const LEGACY_RUN_HOURS = "AGENTROUTER_RUN_HOURS";
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36";
+
+// 站点在阿里云 WAF 后面（首个响应会下发 acw_tc cookie）。补齐浏览器常见请求头
+// 可以让请求"更像正常浏览器"，降低被 WAF 判定为机器人而返回拦截页的概率。
+const BROWSER_HEADERS = {
+  "User-Agent": UA,
+  Accept: "application/json, text/plain, */*",
+  "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+  "sec-ch-ua": '"Chromium";v="138", "Not_A Brand";v="24"',
+  "sec-ch-ua-mobile": "?0",
+  "sec-ch-ua-platform": '"Windows"',
+  "Sec-Fetch-Dest": "empty",
+  "Sec-Fetch-Mode": "cors",
+  "Sec-Fetch-Site": "same-origin"
+};
 
 // ---------------------------------------------------------------- 基础工具
 
@@ -252,12 +267,15 @@ function request(method, params) {
   });
 }
 
+// 注意：显式关掉 Loon 的 auto-cookie，改用我们自己从 set-cookie 提取并回传的
+// Cookie（见 warmUp / extractCookies）。这样在旧版 Loon（auto-cookie 需 build
+// 662+）上行为一致，也不会出现两套 cookie 机制同时写入造成重复头。
 function httpGet(url, headers) {
   return request("get", {
     url: url,
     headers: headers || {},
     timeout: TIMEOUT,
-    "auto-cookie": true
+    "auto-cookie": false
   });
 }
 
@@ -267,8 +285,72 @@ function httpPostJson(url, headers, obj) {
     headers: headers || {},
     body: JSON.stringify(obj),
     timeout: TIMEOUT,
-    "auto-cookie": true
+    "auto-cookie": false
   });
+}
+
+function clip(s, n) {
+  s = String(s == null ? "" : s).replace(/\s+/g, " ").trim();
+  return s.length > n ? s.slice(0, n) + "…" : s;
+}
+
+// 从 HTML 里抽个 <title> 便于定位拦截页类型（阿里云 WAF 拦截页通常带特征标题）。
+function htmlTitle(body) {
+  var m = String(body || "").match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  return m ? clip(m[1], 80) : "";
+}
+
+function loginHeaders(base, cookie) {
+  var h = {};
+  for (var k in BROWSER_HEADERS) h[k] = BROWSER_HEADERS[k];
+  h["Content-Type"] = "application/json";
+  h.Referer = base + "/login";
+  h.Origin = base;
+  if (cookie) h.Cookie = cookie;
+  return h;
+}
+
+// 从响应头的 set-cookie 里提取 "k=v; k2=v2" 形式的 Cookie 串。
+// 不依赖 Loon 的 auto-cookie（那个需要较新 build），显式回传更稳。
+function extractCookies(respHeaders) {
+  if (!respHeaders) return "";
+  var raw = respHeaders["set-cookie"] || respHeaders["Set-Cookie"];
+  if (!raw) {
+    for (var k in respHeaders) {
+      if (k.toLowerCase() === "set-cookie") {
+        raw = respHeaders[k];
+        break;
+      }
+    }
+  }
+  if (!raw) return "";
+  var list = Array.isArray(raw) ? raw : String(raw).split(/,(?=[^;=]+=)/);
+  var pairs = [];
+  for (var i = 0; i < list.length; i++) {
+    var first = String(list[i]).split(";")[0].trim();
+    if (first && first.indexOf("=") > 0) pairs.push(first);
+  }
+  return pairs.join("; ");
+}
+
+// 先访问一次登录页，拿到 WAF 下发的 acw_tc cookie，并把它显式带回后续请求。
+// 目的是让 POST 看起来像同一次正常的浏览器会话（很多 WAF 要求先拿到 cookie）。
+async function warmUp(base) {
+  var h = {};
+  for (var k in BROWSER_HEADERS) h[k] = BROWSER_HEADERS[k];
+  h.Accept = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+  h["Sec-Fetch-Dest"] = "document";
+  h["Sec-Fetch-Mode"] = "navigate";
+  h["Sec-Fetch-Site"] = "none";
+  try {
+    var r = await httpGet(base + "/login", h);
+    var cookie = extractCookies(r.resp.headers);
+    log("会话预热: GET /login -> HTTP " + r.resp.status + (cookie ? "，已取得 cookie" : ""));
+    return cookie;
+  } catch (e) {
+    log("会话预热失败(不影响后续): " + (e && e.message ? e.message : e));
+    return "";
+  }
 }
 
 // ---------------------------------------------------------------- 账号收集
@@ -361,14 +443,19 @@ function makeResult(name, status, message, username, quota) {
   };
 }
 
-async function verifyCheckin(base, uid, slackNew, windowDays) {
+async function verifyCheckin(base, uid, cookie, slackNew, windowDays) {
   slackNew = slackNew || 300;
   windowDays = windowDays || 1;
   if (!uid) return { level: "error", detail: "缺少 uid, 跳过日志核验" };
 
   var url = base + SELF_LOG_PATH + "?p=1&page_size=20";
-  var headers = { "User-Agent": UA };
+  var headers = {};
+  for (var hk in BROWSER_HEADERS) headers[hk] = BROWSER_HEADERS[hk];
+  headers.Accept = "application/json, text/plain, */*";
   headers[SELF_LOG_HEADER] = String(uid);
+  headers.Referer = base + "/console/log";
+  // 不依赖 auto-cookie（需较新 build），显式带上登录时拿到的 cookie。
+  if (cookie) headers.Cookie = cookie;
 
   var r;
   try {
@@ -419,24 +506,64 @@ async function passwordLogin(base, acc) {
   if (!email || !password) return makeResult(name, "fail", "未配置 email/password, 跳过", null, null);
 
   log("====== 开始处理账号(账号密码登录): " + name + " ======");
-  var headers = {
-    "User-Agent": UA,
-    "Content-Type": "application/json",
-    Accept: "application/json, text/plain, */*",
-    Referer: base + "/login",
-    Origin: base
-  };
 
-  var r;
-  try {
-    r = await httpPostJson(base + LOGIN_PATH, headers, { username: email, password: password });
-  } catch (e) {
-    return makeResult(name, "fail", "登录请求异常: " + e.message, null, null);
+  // 先预热会话拿 WAF cookie，再登录。失败分两类重试：
+  //   - 5xx（负载均衡/后端临时不可用，实测该站 ALB 会间歇性回 503）：退避后重试；
+  //   - 2xx/4xx 却是 HTML（多为 WAF 拦截页）：重新预热会话后重试。
+  var cookie = await warmUp(base);
+
+  var MAX_ATTEMPTS = 3;
+  var r, bodyText, isHtml;
+  for (var attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      r = await httpPostJson(base + LOGIN_PATH, loginHeaders(base, cookie), { username: email, password: password });
+    } catch (e) {
+      return makeResult(name, "fail", "登录请求异常: " + e.message, null, null);
+    }
+    var setCookie = extractCookies(r.resp.headers);
+    if (setCookie) cookie = setCookie; // 续上服务端新下发的 cookie
+
+    var status = r.resp.status;
+    bodyText = typeof r.data === "string" ? r.data : "";
+    isHtml = /text\/html/i.test(headerGet(r.resp.headers, "content-type")) || /^\s*</.test(bodyText.slice(0, 1));
+
+    // 5xx：服务端/负载均衡临时故障，与我们的请求无关，退避重试即可
+    if (status >= 500) {
+      log("第 " + attempt + " 次登录: HTTP " + status + "（服务端暂时不可用）" + (isHtml ? " 标题: " + (htmlTitle(bodyText) || "(无)") : ""));
+      if (attempt < MAX_ATTEMPTS) {
+        var wait = attempt * 3000;
+        log("等待 " + wait / 1000 + " 秒后重试…");
+        await sleep(wait);
+        continue;
+      }
+      return makeResult(name, "fail", "服务端暂时不可用(HTTP " + status + ")，请稍后重试", null, null);
+    }
+
+    if (!isHtml) break; // 正常 JSON
+
+    log(
+      "第 " + attempt + " 次登录返回 HTML: HTTP " + status +
+        " | Content-Type: " + (headerGet(r.resp.headers, "content-type") || "(空)") +
+        " | 标题: " + (htmlTitle(bodyText) || "(无)") +
+        " | 正文: " + clip(bodyText, 200)
+    );
+    if (attempt < MAX_ATTEMPTS) {
+      log("疑似被 WAF 拦截，重新预热会话后重试…");
+      cookie = await warmUp(base);
+    }
   }
 
-  var bodyText = typeof r.data === "string" ? r.data : "";
-  if (/text\/html/i.test(headerGet(r.resp.headers, "content-type")) || /^\s*</.test(bodyText.slice(0, 1))) {
-    return makeResult(name, "fail", "登录接口返回 HTML(可能被 WAF 拦截或路径变化)", null, null);
+  if (isHtml) {
+    var hint = htmlTitle(bodyText);
+    return makeResult(
+      name,
+      "fail",
+      "登录接口返回 HTML(HTTP " + r.resp.status + "，疑似被 WAF 拦截)" +
+        (hint ? " 页面标题: " + hint : "") +
+        " | 正文片段: " + clip(bodyText, 160),
+      null,
+      null
+    );
   }
 
   var j;
@@ -457,7 +584,7 @@ async function passwordLogin(base, acc) {
   var msg;
 
   if (checkedIn) {
-    var v = await verifyCheckin(base, uid);
+    var v = await verifyCheckin(base, uid, cookie);
     if (v.level === "new" || v.level === "today") {
       msg = "签到成功，日志已确认（" + v.detail + "）";
     } else {
@@ -561,6 +688,10 @@ if (typeof module !== "undefined" && module.exports) {
     parseRunHours: parseRunHours,
     shouldRunNow: shouldRunNow,
     readField: readField,
+    clip: clip,
+    htmlTitle: htmlTitle,
+    loginHeaders: loginHeaders,
+    extractCookies: extractCookies,
     FIELD_ACCOUNT: FIELD_ACCOUNT,
     FIELD_ACCOUNTS: FIELD_ACCOUNTS,
     FIELD_BASE_URL: FIELD_BASE_URL,

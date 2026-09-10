@@ -22,6 +22,7 @@ const F = {
 const state = { logs: [], notifications: [], done: false, requests: [], store: {} };
 let spec = {};
 const RealDate = Date;
+const realSetTimeout = globalThis.setTimeout;
 
 function jsonResp(status, obj, headers) {
   return {
@@ -73,8 +74,16 @@ globalThis.$httpClient = {
 
 function dispatch(method, params, cb) {
   state.requests.push({ method, url: params.url, headers: params.headers, body: params.body });
-  const handler = spec.responder && spec.responder[method];
-  setTimeout(() => {
+  const seq = method === "post" ? spec.postSeq : null;
+  const handler = (spec.responder && spec.responder[method]) || null;
+  realSetTimeout(() => {
+    // postSeq：按调用顺序依次返回（用于验证重试逻辑）
+    if (seq && seq.length) {
+      const h = seq.length > 1 ? seq.shift() : seq[0];
+      if (!h) return cb(method + " postSeq 未返回");
+      if (h.error) return cb(h.error);
+      return cb(null, h.resp, h.data);
+    }
     if (!handler) return cb("unhandled " + method + " " + params.url);
     const h = handler(params, state);
     if (!h) return cb(method + " handler 未返回");
@@ -85,6 +94,7 @@ function dispatch(method, params, cb) {
 
 function reset(s) {
   spec = s;
+  if (s.postSeq) spec = Object.assign({}, s, { postSeq: s.postSeq.slice() });
   state.logs.length = 0;
   state.notifications.length = 0;
   state.requests.length = 0;
@@ -93,6 +103,8 @@ function reset(s) {
   if ("argument" in s) globalThis.$argument = s.argument;
   else delete globalThis.$argument;
   globalThis.Date = "hour" in s ? FakeDate(s.hour) : RealDate;
+  // 脚本内的 sleep 走全局 setTimeout：测试时改成 0 延迟，避免等待重试退避
+  globalThis.setTimeout = (fn) => realSetTimeout(fn, 0);
 }
 
 // ============================================================ 签到脚本用例
@@ -104,6 +116,9 @@ const CHECKIN_CASES = [
       responder: {
         post: () => loginOk(),
         get: (p) => {
+          if (/\/login$/.test(p.url)) {
+            return { resp: { status: 200, headers: { "content-type": "text/html" } }, data: "<html>login page</html>" };
+          }
           assert.strictEqual(p.url, "https://agentrouter.org/api/log/self?p=1&page_size=20");
           assert.strictEqual(p.headers["New-API-User"], "42");
           return logResp([{ content: "签到成功", type: 4, created_at: nowSec() }]);
@@ -113,7 +128,95 @@ const CHECKIN_CASES = [
     expect: {
       title: "[AgentRouter] 签到汇总",
       content: ["✅", "签到成功，日志已确认", "额度 12345"],
-      logs: ["已读取「" + F.ACCOUNT + "」", "✅ 成功"],
+      logs: ["已读取「" + F.ACCOUNT + "」", "会话预热: GET /login -> HTTP 200", "✅ 成功"],
+    },
+  },
+  {
+    name: "WAF 重试：首次 POST 返回 HTML、重试拿到 JSON → 最终成功",
+    spec: {
+      store: { [F.ACCOUNT]: "a@x.com#pwdA" },
+      responder: {
+        get: (p) =>
+          /\/login$/.test(p.url)
+            ? { resp: { status: 200, headers: { "content-type": "text/html" } }, data: "<html>waf</html>" }
+            : logResp([{ content: "签到成功", type: 4, created_at: nowSec() }]),
+        post: null, // 由下方 postSeq 覆盖
+      },
+      postSeq: [
+        { resp: { status: 200, headers: { "content-type": "text/html" } }, data: "<html><title>拦截</title>blocked</html>" },
+        loginOk(),
+      ],
+    },
+    expect: {
+      title: "[AgentRouter] 签到汇总",
+      content: ["✅"],
+      logs: ["第 1 次登录返回 HTML", "重新预热会话后重试…"],
+    },
+  },
+  {
+    name: "服务端 5xx（ALB 暂时不可用）：退避重试后成功",
+    spec: {
+      store: { [F.ACCOUNT]: "a@x.com#pwdA" },
+      responder: {
+        get: (p) =>
+          /\/login$/.test(p.url)
+            ? { resp: { status: 200, headers: { "content-type": "text/html" } }, data: "<html>login</html>" }
+            : logResp([{ content: "签到成功", type: 4, created_at: nowSec() }]),
+      },
+      postSeq: [
+        {
+          resp: { status: 503, headers: { "content-type": "text/html" } },
+          data: "<html><head><title>503 Service Temporarily Unavailable</title></head><body><center>alb</center></body></html>",
+        },
+        loginOk(),
+      ],
+    },
+    expect: {
+      title: "[AgentRouter] 签到汇总",
+      content: ["✅"],
+      logs: ["HTTP 503（服务端暂时不可用）", "等待 3 秒后重试"],
+    },
+  },
+  {
+    name: "服务端持续 5xx：明确报「稍后重试」，不误判成 WAF",
+    spec: {
+      store: { [F.ACCOUNT]: "a@x.com#pwdA" },
+      responder: {
+        get: (p) =>
+          /\/login$/.test(p.url)
+            ? { resp: { status: 200, headers: { "content-type": "text/html" } }, data: "<html>login</html>" }
+            : { resp: { status: 200, headers: {} }, data: "" },
+        post: () => ({
+          resp: { status: 503, headers: { "content-type": "text/html" } },
+          data: "<html><head><title>503 Service Temporarily Unavailable</title></head><body><center>alb</center></body></html>",
+        }),
+      },
+    },
+    expect: {
+      title: "[AgentRouter] 签到汇总",
+      content: ["❌", "服务端暂时不可用(HTTP 503)，请稍后重试"],
+      logs: ["第 3 次登录: HTTP 503"],
+    },
+  },
+  {
+    name: "持续被 WAF 拦截：失败信息里带上标题与正文片段（便于定位）",
+    spec: {
+      store: { [F.ACCOUNT]: "a@x.com#pwdA" },
+      responder: {
+        get: (p) =>
+          /\/login$/.test(p.url)
+            ? { resp: { status: 200, headers: { "content-type": "text/html" } }, data: "<html>waf</html>" }
+            : { resp: { status: 200, headers: {} }, data: "" },
+        post: () => ({
+          resp: { status: 200, headers: { "content-type": "text/html" } },
+          data: "<html><head><title>安全拦截</title></head><body>您的请求被拦截</body></html>",
+        }),
+      },
+    },
+    expect: {
+      title: "[AgentRouter] 签到汇总",
+      content: ["❌", "疑似被 WAF 拦截", "安全拦截", "正文片段"],
+      logs: ["第 1 次登录返回 HTML", "第 3 次登录返回 HTML"],
     },
   },
   {
@@ -403,6 +506,31 @@ function unitTests() {
   t.push(["输入项名称含中文字符", fields.every((f) => /[\u4e00-\u9fa5]/.test(f))]);
   t.push(["输入项名称不含 # ", fields.every((f) => f.indexOf("#") < 0)]);
   t.push(["输入项名称互不相同", new Set(fields).size === fields.length]);
+
+  // WAF 诊断辅助
+  t.push(["clip 截断加省略号", checkin.clip("abcdef", 3) === "abc…"]);
+  t.push(["clip 短串不变", checkin.clip("ab", 5) === "ab"]);
+  t.push(["clip 压缩空白", checkin.clip("a\n\n  b", 10) === "a b"]);
+  t.push(["htmlTitle 抽取标题", checkin.htmlTitle("<html><title>安全拦截</title></html>") === "安全拦截"]);
+  t.push(["htmlTitle 无标题 → 空", checkin.htmlTitle("<html>x</html>") === ""]);
+
+  const lh = checkin.loginHeaders("https://agentrouter.org");
+  t.push(["loginHeaders 是 JSON 内容类型", lh["Content-Type"] === "application/json"]);
+  t.push(["loginHeaders 带 Origin", lh.Origin === "https://agentrouter.org"]);
+  t.push(["loginHeaders 带 Sec-Fetch-Mode", lh["Sec-Fetch-Mode"] === "cors"]);
+  t.push(["loginHeaders 带浏览器 UA", /Chrome\//.test(lh["User-Agent"])]);
+  t.push(["loginHeaders 无 cookie 时不带 Cookie", !("Cookie" in lh)]);
+  t.push(["loginHeaders 有 cookie 时带上", checkin.loginHeaders("https://x.com", "a=1; b=2").Cookie === "a=1; b=2"]);
+
+  const ec = checkin.extractCookies;
+  t.push(["extractCookies 取 acw_tc", ec({ "set-cookie": "acw_tc=abc;path=/;HttpOnly" }) === "acw_tc=abc"]);
+  t.push(["extractCookies 多 cookie 合并", ec({ "set-cookie": "a=1;path=/,b=2;path=/" }) === "a=1; b=2"]);
+  t.push(["extractCookies 数组形式", ec({ "set-cookie": ["a=1;path=/", "b=2;path=/"] }) === "a=1; b=2"]);
+  t.push(["extractCookies 大小写不敏感", ec({ "Set-Cookie": "x=9;path=/" }) === "x=9"]);
+  t.push(["extractCookies 无 set-cookie → 空", ec({ "content-type": "application/json" }) === ""]);
+  t.push(["extractCookies null → 空", ec(null) === ""]);
+  t.push(["extractCookies 无等号的畸形头 → 空", ec({ "set-cookie": "novalue; a=1" }) === ""]);
+  t.push(["extractCookies 忽略属性只留 name=value", ec({ "set-cookie": "sid=v; Path=/; HttpOnly; Max-Age=1800" }) === "sid=v"]);
 
   return t;
 }

@@ -19,15 +19,34 @@
 
 本站“签到” = **每日完成一次登录**：
 
-1. `POST /api/user/login`，body `{"username": 邮箱, "password": 密码}`
+1. 先 `GET /login` **预热会话**，拿到站点 WAF（阿里云，cookie 名 `acw_tc`）下发的 cookie；
+2. `POST /api/user/login`，body `{"username": 邮箱, "password": 密码}`
    - 服务端下发 session cookie，`data.checked_in = true` 时发放当日额度
    - 登录响应 `data` 里直接带 `quota`（余额），无需额外查询
-2. 登录成功后读取 `GET /api/log/self`（带请求头 `New-API-User: <uid>`），
+3. 登录成功后读取 `GET /api/log/self`（带请求头 `New-API-User: <uid>`），
    确认存在 `type=4`、内容含「签到成功」的当日日志，做一次端到端核验，
    避免「登录成功但签到未真正触发」。
-3. 汇总所有账号结果，发一条 iOS 通知。
+4. 汇总所有账号结果，发一条 iOS 通知。
+
+请求统一带浏览器风格的请求头（`Accept-Language`、`sec-ch-ua`、`Sec-Fetch-*` 等），并把预热得到的 cookie 显式回传——这两个都为了更接近正常浏览器会话、降低被 WAF 拦成 HTML 的概率。cookie 由脚本自己管理，**不依赖 Loon 的 `auto-cookie`**（那个需要 build 662+，本机是 build 81 用不了）。
 
 账号密码固定，不存在第三方会话 cookie 过期问题；服务端按天去重，可放心每天重复运行。
+
+### 出错时怎么排查
+
+脚本对两类临时故障会自动重试（最多 3 次，间隔 3s、6s）：
+
+| 情况 | 脚本行为 |
+| --- | --- |
+| HTTP 5xx（负载均衡/后端临时不可用） | 退避后重试；仍失败则报「服务端暂时不可用，请稍后重试」 |
+| 2xx/4xx 但返回 HTML（疑似 WAF 拦截页） | 重新预热会话再重试 |
+
+如果最终失败，日志和通知里会带上**HTTP 状态码、Content-Type、页面标题、正文片段**，
+直接看这几项就能区分是 WAF 拦截、服务端故障还是账号问题。
+
+浏览器式请求头 + 预热 cookie + 自动重试这套已验证：用 Node 直连站点真实 IP 跑完整流程，
+预热拿到 cookie、登录返回正常 JSON（错误账号会得到「用户名或密码错误」的明确提示）。
+
 
 ### 安装
 
@@ -134,7 +153,7 @@ git add -A && git commit -m "port upstream <short-sha>" && git push
 ```bash
 node --check agentrouter-checkin.js   # 语法检查
 node --check upstream-watch.js
-node test/smoke.js                     # 73 项逻辑 + 安全性 + 时间控制 + 参数兼容测试（stub 掉 Loon 运行时，不发真实请求）
+node test/smoke.js                     # 96 项逻辑 + 安全性 + 时间控制 + 重试/兼容测试（stub 掉 Loon 运行时，不发真实请求）
 ```
 
 两个脚本都在文件末尾判断了运行环境：在 Loon 中自动执行，被 Node `require` 时只导出函数，便于本地测试。
@@ -158,9 +177,10 @@ node test/smoke.js                     # 73 项逻辑 + 安全性 + 时间控制
 - 原版依赖青龙的 `notify` 模块，Loon 版改用 `$notification.post`。
 - 原版的代理、强制 IPv4 环境变量在 Loon 中由 App 自身的网络设置处理，未移植。
 - 原版的 `AGENTROUTER_BASE_URL` 环境变量在 Loon 版对应插件输入项（同样的名字）。
-- 备用域名 `ps.air-outer.com` 功能一致，可通过 `AGENTROUTER_BASE_URL` 切换。
+- 备用域名 `ps.air-outer.com` 功能一致，可通过「站点域名[可留空]」切换。
 
 ### 已知限制
 
 - 本脚本为 cron 定时类型，依赖 App 打开的定时执行机制；iOS 上建议配合 Loon 的后台定时权限使用。
-- 仅在 macOS 上用 Node stub 验证过逻辑与安全性；未在真机 Loon 上跑过完整签到（缺少有效账号）。首次使用建议先手动触发一次，看通知与日志。
+- 逻辑与安全性用 Node stub + 真实站点请求验证过（登录接口能拿到正常 JSON）；但**没有有效账号**，所以「签到成功 → 发额度 → 日志确认」这条完整成功路径未在真机跑通。首次使用建议先手动触发一次，看通知与日志。
+- Loon 走代理/TUN 时的出口 IP 与直连不同，若站点对该出口有风控，仍可能被拦；此时日志里的「HTTP 状态码 + 页面标题 + 正文片段」就是定位依据。
