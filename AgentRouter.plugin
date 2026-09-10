@@ -1,5 +1,5 @@
 #!name=AgentRouter 自动签到
-#!desc=基于 ddgksf2013 的 agentrouter_checkin.js（github.com/ddgksf2013/Scripts）：账号密码登录即签到，含余额查询与日志核验，作者仓库更新自动同步。每天3、5、10点自动执行，点击运行按钮可立即执行。安装后填 AGENTROUTER_ACCOUNT = 邮箱#密码；多账号用 AGENTROUTER_ACCOUNTS 填 JSON 数组。若站点弹人机验证，请到浏览器完成一次验证后再试。
+#!desc=基于 ddgksf2013 的 agentrouter_checkin.js（github.com/ddgksf2013/Scripts）：账号密码登录即签到，含余额查询与日志核验；脚本直接引用作者仓库，作者更新自动同步，无需手动维护。默认每天3、5、10点执行，点击运行按钮立即执行。自定义运行时间两种方式：① Loon 3.5.x 可在脚本页直接修改本任务的 cron；② 或改本仓库插件文件里那一行 cron 后更新插件（所有设备同步生效）。安装后填 AGENTROUTER_ACCOUNT = 邮箱#密码（多账号用 AGENTROUTER_ACCOUNTS 填 JSON 数组）。
 #!author=ddgksf2013
 #!homepage=https://github.com/ddgksf2013/Scripts
 #!icon=https://raw.githubusercontent.com/Koolson/Qure/master/IconSet/Color/Proxy.png
