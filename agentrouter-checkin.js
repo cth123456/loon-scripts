@@ -1,6 +1,6 @@
 /* eslint-disable */
 /**
- * AgentRouter 自动签到 —— Loon 版（cron 定时脚本）
+ * AgentRouter 自动签到 —— Loon 版（cron 定时 + generic 手动入口）
  *
  * 原理：本站"签到"= 每日完成一次登录。
  *   1) POST /api/user/login {username: 邮箱, password: 密码}
@@ -16,7 +16,9 @@
  *   - 插件输入「多账号[JSON数组]」：JSON 数组
  *       [{"name":"甲","account":"a@x.com#pwdA"},{"name":"乙","account":"b@x.com#pwdB"}]
  *       （兼容旧格式每项写 {"name":"...","email":"...","password":"..."}）
- *   - 插件输入「单账号[邮箱和密码]」：`邮箱#密码`
+ *   - 插件输入「单账号[邮箱]」和「单账号[密码]」：分开填写
+ *   - 兼容插件旧输入「单账号[邮箱和密码]」：`邮箱#密码`
+ *   - argument="manual" 绕过小时过滤；"scheduled" 按小时过滤
  *   - 插件输入「站点域名[可留空]」（可选）：覆盖站点域名，默认 https://agentrouter.org
  *   - 插件输入「签到时间点[可留空]」（可选）：如 "9,15,21"，只在匹配的小时签到
  *   旧版英文键（AGENTROUTER_ACCOUNT 等）仍能读，并会自动迁移到中文键。
@@ -32,11 +34,14 @@ const LOGIN_PATH = "/api/user/login";
 const SELF_LOG_PATH = "/api/log/self";
 const SELF_LOG_HEADER = "New-API-User";
 const CHECKIN_LOG_TYPE = 4;
-const TIMEOUT = 20000;
+const TIMEOUT = 10000; // $httpClient timeout 单位为毫秒
+const MAX_ATTEMPTS = 10;
+const ACCOUNT_BUDGET = 90000;
+const RUN_BUDGET = 110000; // 留出通知与 $done 的余量（插件 timeout=120 秒）
 
 // 版本号：手动触发一次后，在 Loon 日志里看这行就能确认当前跑的是哪一版。
 // 更新脚本时同步递增，并同步更新 AgentRouter.checkin.plugin 的 #!desc。
-const SCRIPT_VERSION = "1.4.1";
+const SCRIPT_VERSION = "1.5.0";
 
 const DEFAULT_BASE_URL = "https://agentrouter.org";
 
@@ -46,15 +51,13 @@ const DEFAULT_BASE_URL = "https://agentrouter.org";
 const FIELD_ACCOUNT = "单账号[邮箱和密码]";
 const FIELD_ACCOUNTS = "多账号[JSON数组]";
 const FIELD_BASE_URL = "站点域名[可留空]";
-// 可选：限定只在一天中的哪些小时真正执行。
-// 默认任务 cron 是每天一次（0 9 * * *），此时本项留空即可；
-// 若把 cron 改成每小时（0 * * * *）想一天多次，用它限定具体小时，
-// 例如 "9,15,21"；留空则每次触发都执行。站点本身按天去重，一天一次就够，
-// 频次过高反而容易触发 WAF 风控，所以默认保持每天一次。
+const FIELD_EMAIL = "单账号[邮箱]";
+const FIELD_PASSWORD = "单账号[密码]";
+// cron 每小时唤起，由此字段限定小时；manual 入口不受限制。
+// 保留旧键与空值行为，避免覆盖用户已有小时配置。
 const FIELD_RUN_HOURS = "签到时间点[可留空]";
 // 可选：指定这些请求走哪个节点/策略组（Loon $httpClient 的 node 参数）。
-// 站点挂在阿里云 WAF 后，若经由机房出口的代理节点访问，容易被判为机器人并弹人机验证；
-// 填 DIRECT 表示直连（不经代理），通常能避开；也可填你配置里的某个策略组名。
+// 填 DIRECT 表示直连，也可填已有策略组名；不能保证解决人机验证。
 const FIELD_NODE = "指定节点或策略组[可留空]";
 
 // 旧版（v1.1.0 及更早）的英文键名，继续兼容读取，并自动把值迁移到新键，
@@ -259,27 +262,37 @@ function validateBaseUrl(u) {
 
 // ---------------------------------------------------------------- HTTP
 
-function request(method, params) {
+function request(method, params, deadline) {
   return new Promise(function (resolve, reject) {
+    var remaining = deadline ? deadline - Date.now() : TIMEOUT;
+    if (remaining <= 0) return reject(new Error("时间预算已耗尽"));
+    params.timeout = Math.min(params.timeout, remaining);
+    var settled = false;
+    var timer = setTimeout(function requestWatchdog() {
+      settled = true;
+      // 无取消 API，不能确认底层请求已结束；停止本账号，避免重叠登录。
+      var err = new Error("请求回调超时，停止本账号");
+      err.stopRetry = true;
+      reject(err);
+    }, params.timeout);
     var cb = function (err, resp, data) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       if (err) reject(new Error(String(err)));
       else resolve({ resp: resp || {}, data: data });
     };
     var fn = ($httpClient && $httpClient[method]) || null;
     if (!fn) {
-      reject(new Error("当前环境不支持 $httpClient." + method));
+      cb("当前环境不支持 $httpClient." + method);
       return;
     }
-    fn.call($httpClient, params, cb);
+    try { fn.call($httpClient, params, cb); } catch (e) { cb(e); }
   });
 }
 
-// 注意：显式关掉 Loon 的 auto-cookie，改用我们自己从 set-cookie 提取并回传的
-// Cookie（见 warmUp / extractCookies）。这样在旧版 Loon（auto-cookie 需 build
-// 662+）上行为一致，也不会出现两套 cookie 机制同时写入造成重复头。
-// node 为可选：填了就让这些请求走指定节点/策略组（DIRECT=直连），用于避开
-// 机房出口 IP 触发的人机验证。
-function httpGet(url, headers, node) {
+// 显式管理 Cookie，避免与 auto-cookie 同时写入；不据跨平台 build 号推断能力。
+function httpGet(url, headers, node, deadline) {
   var p = {
     url: url,
     headers: headers || {},
@@ -287,10 +300,10 @@ function httpGet(url, headers, node) {
     "auto-cookie": false
   };
   if (node) p.node = node;
-  return request("get", p);
+  return request("get", p, deadline);
 }
 
-function httpPostJson(url, headers, obj, node) {
+function httpPostJson(url, headers, obj, node, deadline) {
   var p = {
     url: url,
     headers: headers || {},
@@ -299,7 +312,7 @@ function httpPostJson(url, headers, obj, node) {
     "auto-cookie": false
   };
   if (node) p.node = node;
-  return request("post", p);
+  return request("post", p, deadline);
 }
 
 function clip(s, n) {
@@ -359,9 +372,28 @@ function extractCookies(respHeaders) {
   return pairs.join("; ");
 }
 
-// 先访问一次登录页，拿到 WAF 下发的 acw_tc cookie，并把它显式带回后续请求。
-// 目的是让 POST 看起来像同一次正常的浏览器会话（很多 WAF 要求先拿到 cookie）。
-async function warmUp(base, node) {
+// 按名称合并本轮 Cookie，避免新 Set-Cookie 覆盖未更新的 session。
+function mergeCookies(current, incoming) {
+  var pairs = (current + "; " + incoming).split(/;\s*/);
+  var jar = Object.create(null);
+  for (var i = 0; i < pairs.length; i++) {
+    var pos = pairs[i].indexOf("=");
+    if (pos > 0) jar[pairs[i].slice(0, pos).trim()] = pairs[i].slice(pos + 1);
+  }
+  return Object.keys(jar).map(function (key) { return key + "=" + jar[key]; }).join("; ");
+}
+
+function safetyStop(status, body) {
+  if (isCaptchaPage(body) || /captcha|人机验证|验证码|滑块|turnstile/i.test(body))
+    return "站点要求人机验证，脚本不尝试绕过，停止重试；请通过站点官方页面处理";
+  if (/密码错误|密码不正确|账号.*错误|用户不存在|账户.*锁定|invalid.*(credential|password)|incorrect.*(password|credential)|wrong password/i.test(body))
+    return "登录失败：凭据错误或账号受限，停止重试，请核对账号密码";
+  if (status === 401 || status === 403 || status === 429)
+    return "登录失败：HTTP " + status + "，认证拒绝或限流，停止重试";
+  return "";
+}
+
+async function warmUp(base, node, deadline) {
   var h = {};
   for (var k in BROWSER_HEADERS) h[k] = BROWSER_HEADERS[k];
   h.Accept = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
@@ -369,11 +401,22 @@ async function warmUp(base, node) {
   h["Sec-Fetch-Mode"] = "navigate";
   h["Sec-Fetch-Site"] = "none";
   try {
-    var r = await httpGet(base + "/login", h, node);
+    var r = await httpGet(base + "/login", h, node, deadline);
+    // 普通登录 HTML 可能自带 captcha 组件代码，不把单词出现等同于挑战。
+    var warmBody = String(r.data || "");
+    var warmMessage = "";
+    try { warmMessage = String(JSON.parse(warmBody).message || ""); } catch (ignore) {}
+    var stop = safetyStop(Number(r.resp.status), isCaptchaPage(warmBody) ? "人机验证" : warmMessage);
+    if (stop) {
+      var error = new Error(stop);
+      error.stopRetry = true;
+      throw error;
+    }
     var cookie = extractCookies(r.resp.headers);
     log("会话预热: GET /login -> HTTP " + r.resp.status + (cookie ? "，已取得 cookie" : ""));
     return cookie;
   } catch (e) {
+    if (e.stopRetry) throw e;
     log("会话预热失败(不影响后续): " + (e && e.message ? e.message : e));
     return "";
   }
@@ -416,7 +459,7 @@ function tryParseAccountsJson(raw) {
 function collectAccounts() {
   // 1) 脚本行 argument
   var arg = getArgument().trim();
-  if (arg) {
+  if (arg && arg !== "manual" && arg !== "scheduled") {
     var fromArg = tryParseAccountsJson(arg);
     if (fromArg && fromArg.length) {
       log("已读取脚本 argument 中的多账号配置, 共 " + fromArg.length + " 个");
@@ -440,7 +483,16 @@ function collectAccounts() {
     if (list) log("「" + FIELD_ACCOUNTS + "」未解析出有效账号, 回退到单账号");
   }
 
-  // 3) 单账号（邮箱#密码）
+  // 3) 分开输入；任一项已填则不静默回退到旧账号，密码原样保留。
+  var email = readStore(FIELD_EMAIL).trim();
+  var password = readStore(FIELD_PASSWORD);
+  if (email || password) {
+    if (email && password) return [{ name: "默认账号", email: email, password: password }];
+    log("分开输入的账号和密码必须同时填写");
+    return [];
+  }
+
+  // 4) 兼容旧单账号（邮箱#密码）
   var singleRaw = readField(FIELD_ACCOUNT, LEGACY_ACCOUNT).trim();
   if (singleRaw) {
     var one = parseAccount(singleRaw);
@@ -469,7 +521,7 @@ function makeResult(name, status, message, username, quota) {
   };
 }
 
-async function verifyCheckin(base, uid, cookie, node, slackNew, windowDays) {
+async function verifyCheckin(base, uid, cookie, node, deadline, slackNew, windowDays) {
   slackNew = slackNew || 300;
   windowDays = windowDays || 1;
   if (!uid) return { level: "error", detail: "缺少 uid, 跳过日志核验" };
@@ -485,7 +537,7 @@ async function verifyCheckin(base, uid, cookie, node, slackNew, windowDays) {
 
   var r;
   try {
-    r = await httpGet(url, headers, node);
+    r = await httpGet(url, headers, node, deadline);
   } catch (e) {
     return { level: "error", detail: "日志查询异常: " + e.message };
   }
@@ -525,96 +577,63 @@ async function verifyCheckin(base, uid, cookie, node, slackNew, windowDays) {
   return { level: "none", detail: "最近一条签到日志较旧（" + agoStr + "）" };
 }
 
-async function passwordLogin(base, acc, node) {
+async function passwordLogin(base, acc, node, runDeadline) {
   var name = acc.name || "默认账号";
   var email = (acc.email || "").trim();
-  var password = (acc.password || "").trim();
+  var password = acc.password || "";
   if (!email || !password) return makeResult(name, "fail", "未配置 email/password, 跳过", null, null);
 
   log("====== 开始处理账号(账号密码登录): " + name + " ======");
 
-  // 先预热会话拿 WAF cookie，再登录。失败分三类处理：
-  //   - 5xx（负载均衡/后端临时不可用）：退避后重试；
-  //   - 人机验证页：脚本无法解决，立即失败（重试只会加重风控）；
-  //   - 其它 HTML（普通拦截页）：重新预热会话后重试。
-  var cookie = await warmUp(base, node);
-
-  var MAX_ATTEMPTS = 3;
-  var r, bodyText, isHtml;
-  for (var attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    try {
-      r = await httpPostJson(base + LOGIN_PATH, loginHeaders(base, cookie), { username: email, password: password }, node);
-    } catch (e) {
-      return makeResult(name, "fail", "登录请求异常: " + e.message, null, null);
-    }
-    var setCookie = extractCookies(r.resp.headers);
-    if (setCookie) cookie = setCookie; // 续上服务端新下发的 cookie
-
-    var status = r.resp.status;
-    bodyText = typeof r.data === "string" ? r.data : "";
-    isHtml = /text\/html/i.test(headerGet(r.resp.headers, "content-type")) || /^\s*</.test(bodyText.slice(0, 1));
-
-    // 人机验证页：脚本无法执行 JS / 拖滑块，直接明确失败并给出解法，不要浪费重试
-    if (isHtml && isCaptchaPage(bodyText)) {
-      log("检测到阿里云 WAF 人机验证页（HTTP " + status + "），脚本无法自行通过，停止重试");
-      return makeResult(
-        name,
-        "fail",
-        "站点要求人机验证(阿里云 WAF)。脚本无法自动通过；通常是当前出口 IP(代理/机房) 被风控，" +
-          "请在插件里把「" + FIELD_NODE + "」填成 DIRECT 直连，或换一个干净节点后重试",
-        null,
-        null
-      );
-    }
-
-    // 5xx：服务端/负载均衡临时故障，与我们的请求无关，退避重试即可
-    if (status >= 500) {
-      log("第 " + attempt + " 次登录: HTTP " + status + "（服务端暂时不可用）" + (isHtml ? " 标题: " + (htmlTitle(bodyText) || "(无)") : ""));
-      if (attempt < MAX_ATTEMPTS) {
-        var wait = attempt * 3000;
-        log("等待 " + wait / 1000 + " 秒后重试…");
-        await sleep(wait);
-        continue;
-      }
-      return makeResult(name, "fail", "服务端暂时不可用(HTTP " + status + ")，请稍后重试", null, null);
-    }
-
-    if (!isHtml) break; // 正常 JSON
-
-    log(
-      "第 " + attempt + " 次登录返回 HTML: HTTP " + status +
-        " | Content-Type: " + (headerGet(r.resp.headers, "content-type") || "(空)") +
-        " | 标题: " + (htmlTitle(bodyText) || "(无)") +
-        " | 正文: " + clip(bodyText, 200)
-    );
-    if (attempt < MAX_ATTEMPTS) {
-      log("疑似被 WAF 拦截（非人机验证），重新预热会话后重试…");
-      cookie = await warmUp(base, node);
-    }
-  }
-
-  if (isHtml) {
-    var hint = htmlTitle(bodyText);
-    return makeResult(
-      name,
-      "fail",
-      "登录接口返回 HTML(HTTP " + r.resp.status + "，疑似被 WAF 拦截)" +
-        (hint ? " 页面标题: " + hint : "") +
-        " | 正文片段: " + clip(bodyText, 160),
-      null,
-      null
-    );
-  }
-
-  var j;
+  var deadline = Math.min(Date.now() + ACCOUNT_BUDGET, runDeadline);
+  var cookie = "", j = null, lastError = "登录未完成";
   try {
-    j = JSON.parse(r.data);
+    cookie = await warmUp(base, node, deadline);
+    for (var attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      if (Date.now() >= deadline) { lastError = "时间预算已耗尽"; break; }
+      var retry = false;
+      try {
+        var r = await httpPostJson(base + LOGIN_PATH, loginHeaders(base, cookie),
+          { username: email, password: password }, node, deadline);
+        cookie = mergeCookies(cookie, extractCookies(r.resp.headers));
+        var status = Number(r.resp.status);
+        var bodyText = typeof r.data === "string" ? r.data : "";
+        var isHtml = /text\/html/i.test(headerGet(r.resp.headers, "content-type")) || /^\s*</.test(bodyText);
+        var payload = null;
+        try { payload = JSON.parse(bodyText); } catch (ignore) {}
+        // 仅检查错误消息，避免成功响应中的用户名等包含 captcha 时误判。
+        var stop = safetyStop(status, isHtml ? bodyText : String(payload && payload.message || bodyText));
+        if (payload && payload.success === true && status >= 200 && status < 300) {
+          j = payload;
+          break; // 登录成功立即停止 POST，日志失败也不重新登录
+        }
+        if (stop) return makeResult(name, "fail", stop, null, null);
+        if (status >= 500 && status <= 599) {
+          lastError = "服务端暂时不可用(HTTP " + status + ")，请稍后重试";
+          log("第 " + attempt + " 次登录: HTTP " + status + "（服务端暂时不可用）");
+          retry = true;
+        } else if (isHtml && status >= 200 && status < 300) {
+          lastError = "登录接口返回 HTML(疑似被 WAF 拦截)，页面标题: " + (htmlTitle(bodyText) || "(无)");
+          log("第 " + attempt + " 次登录返回 HTML: HTTP " + status);
+          retry = true;
+        } else {
+          // 未知业务失败也不盲目重试，避免锁号；不输出可能回显秘密的正文。
+          lastError = payload ? "登录失败：服务端未确认成功，请核对配置或稍后再试" : "登录响应非 JSON";
+        }
+      } catch (e) {
+        lastError = "登录请求异常: " + e.message;
+        retry = !e.stopRetry;
+      }
+      if (!retry || attempt === MAX_ATTEMPTS) break;
+      var wait = 3000;
+      if (Date.now() + wait >= deadline) { lastError = "时间预算已耗尽"; break; }
+      log("等待 3 秒后重试…");
+      await sleep(wait);
+    }
   } catch (e) {
-    return makeResult(name, "fail", "登录响应非 JSON: " + bodyText.slice(0, 120), null, null);
+    lastError = e.message;
   }
-  if (!j.success) {
-    return makeResult(name, "fail", "登录失败: " + (j.message || bodyText.slice(0, 120)), null, null);
-  }
+  if (!j) return makeResult(name, "fail", lastError, null, null);
 
   var data = j.data || {};
   var checkedIn = !!data.checked_in;
@@ -624,7 +643,7 @@ async function passwordLogin(base, acc, node) {
   var msg;
 
   if (checkedIn) {
-    var v = await verifyCheckin(base, uid, cookie, node);
+    var v = await verifyCheckin(base, uid, cookie, node, deadline);
     if (v.level === "new" || v.level === "today") {
       msg = "签到成功，日志已确认（" + v.detail + "）";
     } else {
@@ -642,7 +661,9 @@ async function main() {
   log("AgentRouter 自动签到启动 (Loon) v" + SCRIPT_VERSION);
 
   var runHours = parseRunHours(readField(FIELD_RUN_HOURS, LEGACY_RUN_HOURS));
-  if (runHours.length) {
+  var manual = getArgument().trim() === "manual";
+  log(manual ? "手动入口：绕过小时过滤" : "定时入口：按配置小时过滤（含手动点击 cron）");
+  if (!manual && runHours.length) {
     var hour = new Date().getHours();
     if (!shouldRunNow(runHours, hour)) {
       log("当前 " + hour + " 点不在「" + FIELD_RUN_HOURS + "」(" + runHours.join(",") + ") 内，本次跳过");
@@ -660,7 +681,7 @@ async function main() {
 
   var accounts = collectAccounts();
   if (!accounts.length) {
-    notify("[AgentRouter] 签到失败", "未检测到账号配置，请在插件里填写「" + FIELD_ACCOUNT + "」（格式 邮箱#密码）");
+    notify("[AgentRouter] 签到失败", "未检测到账号配置，请同时填写「" + FIELD_EMAIL + "」和「" + FIELD_PASSWORD + "」，或检查多账号/旧配置");
     return;
   }
 
@@ -669,15 +690,20 @@ async function main() {
   if (node) log("本次请求将走节点/策略组: " + node);
 
   var results = [];
+  var runDeadline = Date.now() + RUN_BUDGET;
   for (var i = 0; i < accounts.length; i++) {
+    if (Date.now() >= runDeadline) {
+      results.push(makeResult("剩余 " + (accounts.length - i) + " 个账号", "fail", "整轮时间预算已耗尽，未执行", null, null));
+      break;
+    }
     try {
-      var res = await passwordLogin(base, accounts[i], node);
+      var res = await passwordLogin(base, accounts[i], node, runDeadline);
       if (res) results.push(res);
     } catch (e) {
       log("[" + (accounts[i].name || "?") + "] 处理异常: " + (e && e.message ? e.message : e));
     }
     if (accounts.length > 1 && i < accounts.length - 1) {
-      await sleep(3000);
+      await sleep(Math.min(3000, Math.max(0, runDeadline - Date.now())));
     }
   }
 
@@ -737,6 +763,9 @@ if (typeof module !== "undefined" && module.exports) {
     isCaptchaPage: isCaptchaPage,
     loginHeaders: loginHeaders,
     extractCookies: extractCookies,
+    mergeCookies: mergeCookies,
+    FIELD_EMAIL: FIELD_EMAIL,
+    FIELD_PASSWORD: FIELD_PASSWORD,
     FIELD_ACCOUNT: FIELD_ACCOUNT,
     FIELD_ACCOUNTS: FIELD_ACCOUNTS,
     FIELD_BASE_URL: FIELD_BASE_URL,

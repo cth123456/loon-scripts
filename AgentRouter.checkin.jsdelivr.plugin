@@ -1,8 +1,10 @@
 #!name=AgentRouter 自动签到（jsDelivr 镜像版）
-#!desc=v1.4.1 · 与主版功能完全相同，但脚本改经 jsDelivr CDN 分发——适用于 raw.githubusercontent.com 拉取失败（超时/被重置）的网络环境。注意：jsDelivr 对分支内容有约 12 小时缓存，脚本更新会延迟生效；网络恢复后建议换回主版插件。填账号方式同主版：单账号填 邮箱和密码 两项（英文井号隔开），多账号填 JSON 数组；遇人机验证把「指定节点或策略组」填 DIRECT。
+#!desc=v1.5.0 · 单账号请分开填写邮箱和密码，多账号填 JSON 数组；兼容旧单账号配置。定时任务每小时唤起，仅在「签到时间点」匹配时登录，留空每小时执行。立即运行请选择「AgentRouter手动签到」；点击 cron 的运行按钮仍受小时过滤。每账号每轮最多10次登录，成功立即停止，凭据错误、人机验证和限流不重试；预算可能提前结束。每周一检查上游更新。
 #!author=cth123456
 #!homepage=https://github.com/cth123456/loon-scripts
 #!icon=https://raw.githubusercontent.com/Koolson/Qure/master/IconSet/Color/Proxy.png
+#!input = 单账号[邮箱]
+#!input = 单账号[密码]
 #!input = 单账号[邮箱和密码]
 #!input = 多账号[JSON数组]
 #!input = 签到时间点[可留空]
@@ -10,5 +12,6 @@
 #!input = 站点域名[可留空]
 
 [Script]
-cron "0 9 * * *" script-path=https://cdn.jsdelivr.net/gh/cth123456/loon-scripts@main/agentrouter-checkin.js, tag=AgentRouter签到, enable=true, timeout=120
+cron "0 * * * *" script-path=https://cdn.jsdelivr.net/gh/cth123456/loon-scripts@main/agentrouter-checkin.js, tag=AgentRouter签到, enable=true, timeout=120, argument="scheduled"
+generic script-path=https://cdn.jsdelivr.net/gh/cth123456/loon-scripts@main/agentrouter-checkin.js, tag=AgentRouter手动签到, timeout=120, argument="manual"
 cron "0 10 * * 1" script-path=https://cdn.jsdelivr.net/gh/cth123456/loon-scripts@main/upstream-watch.js, tag=AgentRouter上游检查, enable=true, timeout=60

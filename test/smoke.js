@@ -14,6 +14,8 @@ const watch = require("../upstream-watch.js");
 
 // ------------------------------------------------------------ mock 基础设施
 const F = {
+  EMAIL: checkin.FIELD_EMAIL,
+  PASSWORD: checkin.FIELD_PASSWORD,
   ACCOUNT: checkin.FIELD_ACCOUNT,
   ACCOUNTS: checkin.FIELD_ACCOUNTS,
   BASE_URL: checkin.FIELD_BASE_URL,
@@ -22,6 +24,7 @@ const F = {
 };
 const state = { logs: [], notifications: [], done: false, requests: [], store: {} };
 let spec = {};
+let clock = 0;
 const RealDate = Date;
 const realSetTimeout = globalThis.setTimeout;
 
@@ -74,7 +77,10 @@ globalThis.$httpClient = {
 };
 
 function dispatch(method, params, cb) {
-  state.requests.push({ method, url: params.url, headers: params.headers, body: params.body, node: params.node });
+  state.requests.push({ method, url: params.url, headers: params.headers, body: params.body, node: params.node, timeout: params.timeout });
+  if (/agentrouter.org/.test(params.url)) assert(params.timeout > 0 && params.timeout <= 10000);
+  if (spec.hangPost && method === "post") return;
+  if (spec.advance) clock += Math.min(spec.advance, params.timeout);
   const seq = method === "post" ? spec.postSeq : null;
   const handler = (spec.responder && spec.responder[method]) || null;
   realSetTimeout(() => {
@@ -105,7 +111,19 @@ function reset(s) {
   else delete globalThis.$argument;
   globalThis.Date = "hour" in s ? FakeDate(s.hour) : RealDate;
   // 脚本内的 sleep 走全局 setTimeout：测试时改成 0 延迟，避免等待重试退避
-  globalThis.setTimeout = (fn) => realSetTimeout(fn, 0);
+  globalThis.setTimeout = (fn, ms) => {
+    // 退避虚拟推进时间；请求 watchdog 不提前触发正常回调。
+    if (fn.name !== "requestWatchdog") {
+      clock += ms;
+      return realSetTimeout(fn, 0);
+    }
+    return realSetTimeout(fn, s.watchdog ? 5 : ms);
+  };
+  clock = RealDate.now();
+  state.startedAt = clock;
+  globalThis.Date = class extends ("hour" in s ? FakeDate(s.hour) : RealDate) {
+    static now() { return clock; }
+  };
 }
 
 // ============================================================ 签到脚本用例
@@ -151,7 +169,8 @@ const CHECKIN_CASES = [
     expect: {
       title: "[AgentRouter] 签到汇总",
       content: ["✅"],
-      logs: ["第 1 次登录返回 HTML", "重新预热会话后重试…"],
+      logs: ["第 1 次登录返回 HTML", "等待 3 秒后重试…"],
+      postCount: 2,
     },
   },
   {
@@ -196,11 +215,12 @@ const CHECKIN_CASES = [
     expect: {
       title: "[AgentRouter] 签到汇总",
       content: ["❌", "服务端暂时不可用(HTTP 503)，请稍后重试"],
-      logs: ["第 3 次登录: HTTP 503"],
+      logs: ["第 10 次登录: HTTP 503"],
+      postCount: 10,
     },
   },
   {
-    name: "持续被 WAF 拦截：失败信息里带上标题与正文片段（便于定位）",
+    name: "持续被 WAF 拦截：保留标题但不输出正文",
     spec: {
       store: { [F.ACCOUNT]: "a@x.com#pwdA" },
       responder: {
@@ -216,12 +236,13 @@ const CHECKIN_CASES = [
     },
     expect: {
       title: "[AgentRouter] 签到汇总",
-      content: ["❌", "疑似被 WAF 拦截", "安全拦截", "正文片段"],
-      logs: ["第 1 次登录返回 HTML", "第 3 次登录返回 HTML"],
+      content: ["❌", "疑似被 WAF 拦截", "安全拦截"],
+      logs: ["第 1 次登录返回 HTML", "第 10 次登录返回 HTML"],
+      postCount: 10,
     },
   },
   {
-    name: "人机验证页：立即失败、给出 DIRECT 提示、不再重试",
+    name: "预热人机验证页：立即失败、不发登录 POST",
     spec: {
       store: { [F.ACCOUNT]: "a@x.com#pwdA" },
       responder: {
@@ -240,9 +261,8 @@ const CHECKIN_CASES = [
     },
     expect: {
       title: "[AgentRouter] 签到汇总",
-      content: ["❌", "人机验证", "DIRECT"],
-      logs: ["检测到阿里云 WAF 人机验证页", "停止重试"],
-      postCount: 1,
+      content: ["❌", "人机验证", "停止重试"],
+      postCount: 0,
     },
   },
   {
@@ -308,7 +328,7 @@ const CHECKIN_CASES = [
   {
     name: "登录 success=false",
     spec: { store: { [F.ACCOUNT]: "a@x.com#pwdA" }, responder: { post: () => jsonResp(200, { success: false, message: "密码错误" }) } },
-    expect: { title: "[AgentRouter] 签到汇总", content: ["❌", "登录失败", "密码错误"] },
+    expect: { title: "[AgentRouter] 签到汇总", content: ["❌", "登录失败", "凭据错误"], postCount: 1 },
   },
   {
     name: "网络异常：登录请求超时",
@@ -412,6 +432,57 @@ const CHECKIN_CASES = [
     expect: { done: true, title: "[AgentRouter] 签到汇总" },
   },
 ];
+
+// 1.5.0 回归场景，所有 HTTP 均为 stub。
+const accountStore = { [F.EMAIL]: "a#tag@example.com", [F.PASSWORD]: " p#a#ss " };
+const warm = () => ({ resp: { status: 200, headers: {} }, data: "<html>login</html>" });
+for (const [argument, hour, run] of [["manual", 18, true], ["scheduled", 18, false], ["scheduled", 3, true], ["scheduled", 5, true], ["scheduled", 10, true]]) {
+  CHECKIN_CASES.push({
+    name: `${argument} ${hour}点，配置3,5,10`,
+    spec: { argument, hour, store: { ...accountStore, [F.RUN_HOURS]: "3,5,10" }, responder: {
+      get: warm,
+      post: (p) => {
+        assert.deepStrictEqual(JSON.parse(p.body), { username: "a#tag@example.com", password: " p#a#ss " });
+        return loginOk({ checked_in: false });
+      },
+    } },
+    expect: run ? { title: "[AgentRouter] 签到汇总", postCount: 1 } : { noNotify: true, noRequests: true },
+  });
+}
+for (const [name, seq, expected] of [
+  ["网络失败后成功", [{ error: "timeout" }, loginOk({ checked_in: false })], 2],
+  ["第十次成功立即停止", [...Array(9).fill(jsonResp(503, {})), loginOk({ checked_in: false })], 10],
+  ["JSON captcha 不重试", [jsonResp(200, { success: false, message: "captcha required" }), loginOk()], 1],
+  ["HTML captcha 不重试", [{ resp: { status: 503, headers: {} }, data: '<html>aliyun_waf_aa</html>' }, loginOk()], 1],
+  ["明确密码错误不重试", [jsonResp(500, { success: false, message: "invalid credentials" }), loginOk()], 1],
+  ["限流不重试", [jsonResp(429, {}), loginOk()], 1],
+  ["认证拒绝不重试", [jsonResp(403, {}), loginOk()], 1],
+]) {
+  CHECKIN_CASES.push({ name, spec: { store: accountStore, responder: { get: warm }, postSeq: seq }, expect: { postCount: expected, title: "[AgentRouter] 签到汇总" } });
+}
+CHECKIN_CASES.push(
+  { name: "普通预热HTML含captcha组件不误判挑战", spec: { store: accountStore, responder: { get: () => ({ resp: { status: 200, headers: {} }, data: '<html><script src="captcha-widget.js"></script></html>' }), post: () => loginOk({ checked_in: false }) } }, expect: { postCount: 1, content: ["checked_in=false"] } },
+  { name: "旧英文小时配置保留且scheduled未命中", spec: { argument: "scheduled", hour: 18, store: { ...accountStore, AGENTROUTER_RUN_HOURS: "3,5,10" } }, expect: { noRequests: true, storeHas: { [F.RUN_HOURS]: "3,5,10" } } },
+  { name: "分开凭据优先于旧值", spec: { store: { ...accountStore, [F.ACCOUNT]: "old@example.com#old" }, responder: { get: warm, post: p => {
+    assert.strictEqual(JSON.parse(p.body).password, " p#a#ss "); return loginOk({ checked_in: false });
+  } } }, expect: { postCount: 1 } },
+  { name: "分开凭据不完整不回退旧值", spec: { store: { [F.EMAIL]: "new@example.com", [F.ACCOUNT]: "old@example.com#old" } }, expect: { noRequests: true, title: "[AgentRouter] 签到失败" } },
+  { name: "单账号慢响应受90秒预算限制", spec: { store: accountStore, advance: 10000, responder: { get: warm }, postSeq: [jsonResp(503, {})] }, expect: { postCount: 7, content: ["时间预算已耗尽"], maxElapsed: 90000 } },
+  { name: "回调不返回 watchdog 停止不重试并done", runOnce: true, spec: { store: accountStore, watchdog: true, hangPost: true, responder: { get: warm } }, expect: { postCount: 1, done: true, content: ["回调超时"] } },
+  { name: "多账号共享110秒预算，剩余明确未执行", spec: { store: { [F.ACCOUNTS]: JSON.stringify(Array.from({ length: 3 }, (_, i) => ({ email: `a${i}@example.com`, password: "p" }))) }, advance: 10000, responder: { get: warm }, postSeq: [jsonResp(503, {})] }, expect: { content: ["整轮时间预算已耗尽，未执行"], maxElapsed: 110000 } },
+  { name: "Cookie 跨失败与成功合并，核验保留session", spec: {
+    store: accountStore,
+    responder: { get: p => {
+      if (/\/login$/.test(p.url)) return { resp: { status: 200, headers: { 'Set-Cookie': ['acw_tc=old; Path=/', 'session=keep; Path=/'] } }, data: "<html>login</html>" };
+      assert.strictEqual(p.headers.Cookie, "acw_tc=new; session=keep; auth=ok");
+      return logResp([{ content: "签到成功", type: 4, created_at: nowSec() }]);
+    }, post: (p, s) => {
+      if (s.requests.filter(r => r.method === "post").length === 1) return jsonResp(503, {}, { 'Set-Cookie': 'acw_tc=new; Path=/' });
+      assert.strictEqual(p.headers.Cookie, "acw_tc=new; session=keep");
+      const r = loginOk(); r.resp.headers['Set-Cookie'] = 'auth=ok; Path=/'; return r;
+    } },
+  }, expect: { postCount: 2, content: ["日志已确认"] } }
+);
 
 // ============================================================ 上游检查用例
 const ATOM = (sha, msg, date) =>
@@ -585,6 +656,18 @@ function unitTests() {
   t.push(["extractCookies 无等号的畸形头 → 空", ec({ "set-cookie": "novalue; a=1" }) === ""]);
   t.push(["extractCookies 忽略属性只留 name=value", ec({ "set-cookie": "sid=v; Path=/; HttpOnly; Max-Age=1800" }) === "sid=v"]);
 
+  const fs = require("fs");
+  const path = require("path");
+  const plugin = fs.readFileSync(path.join(__dirname, "../AgentRouter.checkin.plugin"), "utf8");
+  const mirror = fs.readFileSync(path.join(__dirname, "../AgentRouter.checkin.jsdelivr.plugin"), "utf8")
+    .replace("（jsDelivr 镜像版）", "")
+    .replaceAll("https://cdn.jsdelivr.net/gh/cth123456/loon-scripts@main/", "https://raw.githubusercontent.com/cth123456/loon-scripts/main/");
+  t.push(["两份插件功能完全一致", plugin === mirror]);
+  t.push(["插件每小时 scheduled 与 generic manual", /cron "0 \* \* \* \*"[^\n]+argument="scheduled"/.test(plugin) && /generic [^\n]+argument="manual"/.test(plugin)]);
+  t.push(["插件与脚本版本1.5.0一致", checkin.SCRIPT_VERSION === "1.5.0" && plugin.includes("v1.5.0")]);
+  t.push(["插件包含分开的中文输入", plugin.includes("#!input = " + F.EMAIL) && plugin.includes("#!input = " + F.PASSWORD)]);
+  t.push(["Cookie同名更新保留其他值", checkin.mergeCookies("sid=1; waf=a", "waf=b; auth=x=y") === "sid=1; waf=b; auth=x=y"]);
+  t.push(["Cookie Expires逗号不破坏分割", ec({ "set-cookie": "sid=1; Expires=Wed, 09 Jun 2027 10:18:14 GMT, waf=b; Path=/" }) === "sid=1; waf=b"]);
   return t;
 }
 
@@ -620,6 +703,7 @@ function checkExpect(c, threw) {
     for (const s of exp.content) if (String(note.content).indexOf(s) < 0) problems.push(`通知内容缺少「${s}」`);
   }
   if (exp.logs) for (const s of exp.logs) if (logsAll.indexOf(s) < 0) problems.push(`日志缺少「${s}」`);
+  if (exp.maxElapsed && clock - state.startedAt > exp.maxElapsed) problems.push("超出时间预算");
   if (exp.done === true && state.done !== true) problems.push("未调用 $done()");
   if (exp.noRequests && state.requests.length) problems.push("不应发请求但发了 " + state.requests.length + " 个");
   if (exp.postCount !== undefined) {

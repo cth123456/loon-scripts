@@ -1,208 +1,132 @@
 # loon-scripts
 
-个人 Loon 脚本集合（cron 定时任务为主）。
+个人 Loon 脚本集合。当前 AgentRouter 版本：**1.5.0**。
 
-## 脚本
-
-| 脚本 | 说明 | 安装 |
-| --- | --- | --- |
-| `agentrouter-checkin.js` | [AgentRouter](https://agentrouter.org) 每日自动签到（账号密码登录即签到 + 日志核验） | [安装插件](https://raw.githubusercontent.com/cth123456/loon-scripts/main/AgentRouter.checkin.plugin) |
-| `upstream-watch.js` | 每周检查上游 Python 脚本是否有未移植的新提交并提醒 | 随上面的插件一起安装 |
-
----
-
-## AgentRouter 自动签到
-
-由 [773075692/agentrouter-checkin](https://github.com/773075692/agentrouter-checkin)（青龙面板 Python 版）移植的 **Loon 版**。
-
-### 原理
-
-本站“签到” = **每日完成一次登录**：
-
-1. 先 `GET /login` **预热会话**，拿到站点 WAF（阿里云，cookie 名 `acw_tc`）下发的 cookie；
-2. `POST /api/user/login`，body `{"username": 邮箱, "password": 密码}`
-   - 服务端下发 session cookie，`data.checked_in = true` 时发放当日额度
-   - 登录响应 `data` 里直接带 `quota`（余额），无需额外查询
-3. 登录成功后读取 `GET /api/log/self`（带请求头 `New-API-User: <uid>`），
-   确认存在 `type=4`、内容含「签到成功」的当日日志，做一次端到端核验，
-   避免「登录成功但签到未真正触发」。
-4. 汇总所有账号结果，发一条 iOS 通知。
-
-请求统一带浏览器风格的请求头（`Accept-Language`、`sec-ch-ua`、`Sec-Fetch-*` 等），并把预热得到的 cookie 显式回传——这两个都为了更接近正常浏览器会话、降低被 WAF 拦成 HTML 的概率。cookie 由脚本自己管理，**不依赖 Loon 的 `auto-cookie`**（那个需要 build 662+，本机是 build 81 用不了）。
-
-账号密码固定，不存在第三方会话 cookie 过期问题；服务端按天去重，可放心每天重复运行。
-
-### 出错时怎么排查
-
-脚本会自动区分故障类型（最多重试 3 次，间隔 3s、6s）：
-
-| 情况 | 脚本行为 |
+| 脚本 | 说明 |
 | --- | --- |
-| **阿里云 WAF 人机验证页** | **立即失败、不再重试**（重试只会加重风控），并提示改用直连 |
-| HTTP 5xx（负载均衡/后端临时不可用） | 退避后重试；仍失败则报「服务端暂时不可用，请稍后重试」 |
-| 其它 HTML（非人机验证的拦截页） | 重新预热会话再重试 |
+| `agentrouter-checkin.js` | 账号密码登录签到，并查询个人日志核验 |
+| `upstream-watch.js` | 每周检查上游 Python 脚本是否有尚未移植的新提交 |
 
-失败时日志和通知会带上**HTTP 状态码、Content-Type、页面标题、正文片段**，
-直接看这几项就能定位原因。
+## 安装与输入
 
-#### 遇到「需要人机验证」怎么办
+主插件地址：
 
-如果日志出现 `检测到阿里云 WAF 人机验证页`，说明站点判定当前出口 IP 可疑，
-弹出了**滑块/JS 人机验证**——这个必须由真人浏览器完成，任何脚本都过不了。
-
-好消息是：**这种拦截通常是临时的、由访问频率触发**。实测在本机连续高频请求会触发，
-停止请求后几分钟就自动解除，登录接口恢复正常。
-
-处理顺序：
-
-1. **把 `指定节点或策略组[可留空]` 填 `DIRECT`**（直连不走代理），点插件更新后手动触发一次。
-   这是最常见的原因——Loon 若把该域名走了某个机房/共享代理节点，出口 IP 容易被 WAF 标记。
-2. 若直连不通或太慢，改填你配置里另一个**干净节点**的策略组名（如 `HK`）。
-3. 都还不行就**等几分钟**再试：这是频率触发的临时拦截，会自己解除。不要连续手动触发。
-
-脚本检测到人机验证会立即停止并等下一个整点周期，就是为了避免"越试越黑"。
-
-
-### 安装
-
-**方式一：安装插件（推荐）**
-
-在 Loon 中打开下面的链接即可安装插件，插件会创建两个定时任务（每小时签到 + 每周一检查上游）：
-
-```
+```text
 https://raw.githubusercontent.com/cth123456/loon-scripts/main/AgentRouter.checkin.plugin
 ```
 
-安装后在插件详情页填入下面几项（**名字就是你在 Loon 里看到的标签**）：
+安装后创建每小时签到 cron、独立手动 generic、每周一 10 点上游检查任务。升级时需要更新**插件和脚本**，只更新 JS 不会改变旧 cron 或增加输入项、手动入口。不要同时启用两份签到插件，否则可能重复执行。
 
-| 插件里的名称 | 是否必填 | 填什么 |
-| --- | --- | --- |
-| `单账号[邮箱和密码]` | 单账号必填 | `邮箱#密码`，中间用英文 `#` 隔开 |
-| `多账号[JSON数组]` | 多账号可选 | JSON 数组，见下；填了就优先用它 |
-| `签到时间点[可留空]` | 可选 | 如 `9`、`9,15,21`、`9-18`；留空=每小时都签到 |
-| `指定节点或策略组[可留空]` | 可选 | 如 `DIRECT`；遇人机验证时填这个（见「出错时怎么排查」） |
-| `站点域名[可留空]` | 可选 | 默认 `https://agentrouter.org`，一般不用填 |
+| 插件中文标签 | 填写说明 |
+| --- | --- |
+| `单账号[邮箱]` | 新单账号邮箱，与密码分开输入 |
+| `单账号[密码]` | 密码原样传递，支持 `#` 及首尾空格 |
+| `单账号[邮箱和密码]` | 仅为旧配置兼容保留，新用户留空；旧格式为 `邮箱#密码`，按第一个 `#` 分隔 |
+| `多账号[JSON数组]` | 可选，优先于单账号，格式见下 |
+| `签到时间点[可留空]` | 如 `3,5,10`；保留旧值，不自动改写 |
+| `指定节点或策略组[可留空]` | 可选，原样作为请求的 `node` 参数；`DIRECT` 表示直连，不保证能解决验证或网络问题 |
+| `站点域名[可留空]` | 默认 `https://agentrouter.org`；只填写自己确认可信的站点 |
 
-多账号示例（`多账号[JSON数组]`）：
+多账号支持两种格式：
 
 ```json
-[{"name":"甲","account":"a@x.com#pwdA"},{"name":"乙","account":"b@x.com#pwdB"}]
+[{"name":"甲","account":"a@example.com#pwdA"},{"name":"乙","email":"b@example.com","password":"pwdB"}]
 ```
 
-也兼容旧格式：`[{"name":"甲","email":"a@x.com","password":"pwdA"}]`。
+配置优先级：旧凭据 `argument` > 多账号 JSON > 分开的单账号邮箱与密码 > 旧单账号组合字段。新单账号任一字段非空时必须两项同时填写，不会悄悄回退到旧账号。旧英文 `AGENTROUTER_ACCOUNT`、`AGENTROUTER_ACCOUNTS`、`AGENTROUTER_BASE_URL`、`AGENTROUTER_RUN_HOURS` 仍兼容读取并迁移到对应旧中文键。
 
-> **关于字段名**：Loon 旧式插件参数（`#!input`）没有单独的"说明"字段，括号里的名字本身就是显示给用户的标签，也是本地存储的键。所以这里直接用中文。
-> 如果你之前装的是 v1.1.0 之前的版本、填的是英文键（`AGENTROUTER_ACCOUNT` 等），**升级后会继续读取旧值并自动迁移到中文键**，不用重填。
-> 新版 Loon（build 733+）有带 `tag=` / `desc=` 的 `[Argument]` 段，能更好地区分"键名"和"显示名"，但本机 Loon 是 0.4.0 build 81，用不了，故仍用 `#!input` 中文标签方案。
+`argument="manual"` 和 `argument="scheduled"` 是运行模式，不会作为账号解析；旧 `邮箱#密码` 或 JSON argument 仍能使用，且维持小时过滤。分开输入支持邮箱或密码本身包含 `#`；旧组合格式不能无歧义表达含 `#` 的邮箱。
 
-### 时间与次数（cron 自定义）
+## 定时与手动运行
 
-默认是**每天 09:00 运行一次**（`cron "0 9 * * *"`）。
+- **定时入口**：`cron "0 * * * *"` 每小时唤起，`argument="scheduled"` 根据设备本地小时检查 `签到时间点[可留空]`。不匹配时不发请求、不发通知。
+- **手动入口**：在 Loon 内手动触发 **AgentRouter手动签到**（generic，`argument="manual"`），无论几点都绕过小时过滤；仍执行凭据、安全和预算检查。
+- **点击 cron 自带的运行按钮仍是定时入口**：argument 不会因此改变，仍受小时过滤。不能用它验证“手动绕过”。
 
-> 建议就保持默认。站点本身**按天去重**，一天签一次就够；而访问频次过高会被阿里云 WAF
-> 判为机器人、弹人机验证（实测：连续高频请求就会触发）。所以默认从"每小时"改回了"每天一次"。
+例如填 `3,5,10`，自动在本地 03:00、05:00、10:00 执行；18 点自动或手动点击 cron 会跳过，18 点触发独立 generic 会立即执行。
 
-**想一天多次**：把插件里那行签到任务的 `cron "0 9 * * *"` 改成 `cron "0 * * * *"`（每小时唤醒），
-再用 `签到时间点[可留空]` 指定具体几点真正执行：
-
-| 签到时间点 | 效果（cron 为每小时时） |
+| 小时配置 | 定时行为 |
 | --- | --- |
-| 留空 / 不填 | 每小时都签到（一天 24 次，不利风控，不建议） |
-| `9` | 只在 09:00 签到（等价默认值） |
-| `9,15,21` | 每天 9 / 15 / 21 点各一次 |
-| `9-18` | 9 点到 18 点之间的整点各一次 |
-| `22-2` | 支持跨午夜区间 |
+| `3,5,10` | 只在 3、5、10 点执行 |
+| `9` | 每天 9 点执行，建议只需每日签到时使用 |
+| `9-18` | 9 到 18 点的整点 |
+| `22-2` | 跨午夜 22、23、0、1、2 点 |
+| 留空 | 保留历史语义，每小时执行；不会自动填入默认小时 |
 
-不在列表里的小时，脚本会直接跳过并发一行日志，不发通知、不发请求。
-注意：用的是 **Loon 运行设备上的本地时间**（通常就是北京时间）。
+解析器保留原有行为：忽略非法片段；若全部非法，结果与留空相同，不做小时限制。请核对输入，避免不必要的频繁请求。系统休眠、后台调度等可能影响实际执行；脚本不补跑错过的小时。
 
-**要改 cron 本身的节奏**（每 30 分钟、隔天一次等）就改那行 cron：
-格式是 `分 时 日 月 周`（五段），`0 9 * * *` 是每天 9 点、`0 * * * *` 是每小时、`*/30 * * * *` 是每 30 分钟、`0 9 * * 1,3,5` 是每周一三五 9 点。
+### 官方 API 核实与边界
 
-**方式二：手动加定时脚本**
+2026-09-10 查阅 Loon 官方文档：
 
-在配置的 `[Script]` 段加入：
+- [脚本配置](https://nsloon.app/docs/Script/)：cron、generic 和 `argument="..."` 语法；generic 在 App 内手动触发；脚本行 timeout 单位为秒。
+- [Script API](https://nsloon.app/docs/Script/script_api)：`$argument`、`$script.name`、`$script.startTime`，以及 `$environment.params` 的节点/策略上下文；HTTP timeout 单位为毫秒。
+- [官方仓库脚本类型示例](https://github.com/Loon0x00/LoonExampleConfig/blob/master/Script/script_README.md)：generic 手动入口及 cron 示例。
+
+上述文档**未提供可靠识别“手动点击 cron / 自动 cron”的字段**，所以本项目显式区分入口参数，不编造 `$environment` 运行类型，也不按脚本名猜测。
+
+沿用旧式 `#!input` 中文标签，名称同时是本地存储键。不同平台的 build 编号不能直接比较，**不能仅凭 Mac build 81 与 iOS build 662/733 的数字大小断言特性不可用**。本版本未在用户的 Loon 真机上验证 generic 展示位置、参数传递和客户端版本兼容性。
+
+如自行配置，以下两行读取已保存的插件输入；没有保存凭据时不会登录：
 
 ```ini
-cron "0 9 * * *" script-path=https://raw.githubusercontent.com/cth123456/loon-scripts/main/agentrouter-checkin.js, tag=AgentRouter签到, enable=true, timeout=120, argument = "邮箱#密码"
-cron "0 10 * * 1" script-path=https://raw.githubusercontent.com/cth123456/loon-scripts/main/upstream-watch.js, tag=AgentRouter上游检查, enable=true, timeout=60
+[Script]
+cron "0 * * * *" script-path=https://raw.githubusercontent.com/cth123456/loon-scripts/main/agentrouter-checkin.js, tag=AgentRouter签到, enable=true, timeout=120, argument="scheduled"
+generic script-path=https://raw.githubusercontent.com/cth123456/loon-scripts/main/agentrouter-checkin.js, tag=AgentRouter手动签到, timeout=120, argument="manual"
 ```
 
-`argument` 支持单个 `邮箱#密码`，也支持直接填账号 JSON 数组。
-优先级：`argument` > `多账号[JSON数组]` > `单账号[邮箱和密码]`。
-只用 `argument` 时无法配置 `签到时间点`（那是插件输入项），需要限时请走插件方式。
+## 登录、重试与安全边界
 
-### 跟随上游 Python 更新
+1. `GET /login` 预热会话，提取响应 Cookie。
+2. `POST /api/user/login` 提交账号密码。每账号每轮**最多 10 次 POST（包含首次，不是额外重试 10 次）**。
+3. 成功响应立即停止登录 POST；若 `data.checked_in=true`，查询一次 `/api/log/self`，携带 `New-API-User` 与合并后的 Cookie。日志查询失败或 `checked_in=false` 不会再次登录。
+4. 汇总通知。登录成功不等于已验证发放额度，以服务端响应和日志为准。现有日志判定使用近 24 小时窗口，而非严格的本地自然日。
 
-上游 `agentrouter_checkin.py` 是用 Python 写的，Loon 只能跑 JavaScript，**没有办法直接执行或自动翻译它**。所以"跟随更新"做成了带提醒的半自动流程：
+| 情况 | 行为 |
+| --- | --- |
+| 网络错误（HTTP 客户端已回调）、HTTP 5xx | 间隔 3 秒后重试，受次数和预算双重限制 |
+| 2xx HTML，未识别出验证特征 | 间隔 3 秒重试，沿用并合并已有 Cookie，不重复预热 |
+| 明确凭据错误、账号受限 | 立即停止，不反复试密码 |
+| 已识别验证码/人机验证（预热或登录响应，包括 JSON 错误消息） | 立即停止，不自动解验证码、不绕过挑战 |
+| HTTP 401/403/429 | 停止，避免反复认证或加重限流 |
+| 未知业务失败、其他非 JSON 响应 | 保守停止，不把所有失败都当作可恢复错误 |
 
-1. `upstream-watch.js` 每周一 10:00 检查上游有没有新提交；
-2. 一旦发现我们还没移植的提交，就发一条 iOS 通知，带上提交信息、时间、以及和当前版本的**对比链接**；
-3. 你按下面的「重新移植」步骤把改动搬进 JS；
-4. 改完更新 `upstream-baseline.json` 的 `ported_sha`，下个周期自动对齐，不再重复提醒。
+预算：单请求最多 **10 秒**，每账号含预热、退避及日志查询最多 **90 秒**；所有账号共享 **110 秒**整轮预算，插件 timeout 为 **120 秒**。预算不足会提前停止，因此不是保证每次都发满 10 次。多账号顺序执行，后面的账号可能因整轮预算不足而未执行，通知会说明。客户端回调未返回时由脚本 watchdog 结束等待；没有可靠的底层请求取消 API，因此此情况停止本账号、不继续重试，迟到回调被忽略。不要同时触发多个入口；当前没有跨运行锁，预算和次数按各次运行分别计算。
 
-**判定基准**是 `upstream-baseline.json` 的 `ported_sha`——记录我们已移植到哪个上游提交。当前基准：`88d5f1e`（2026-08-04）。
+Cookie 在单账号本轮内按名称合并，同名新值覆盖，未更新的 WAF/session Cookie 保留，不依赖 `auto-cookie`。这不是完整浏览器 Cookie jar，不解析 Domain/Path/Expires 的完整作用域语义；仅供该站点本轮会话使用，不跨账号缓存。
 
-**重新移植步骤**：
+遇到人机验证，请按站点官方页面指引处理并减少频繁触发。仅凭拦截页无法确定是 IP、频率还是其他原因；不保证换出口、DIRECT 或等待几分钟就解除。脚本识别依赖已知特征，不能保证识别所有挑战变体。
 
-```bash
-# 1. 看上游改了什么
-#    打开通知里的 compare 链接，或本地：
-git clone https://github.com/773075692/agentrouter-checkin /tmp/ar-upstream
-cd /tmp/ar-upstream && git log --oneline -5
+- 凭据存储于 Loon 本地并提交给配置的站点；不要分享带凭据的配置，不要把凭据、Cookie 写入仓库。
+- `站点域名` 保留既有 http/https 与部分本机/私网地址检查，不是完整 DNS/重定向安全隔离；请使用可信 HTTPS 域名，不要向不可信自定义站点提交密码。
+- 错误响应正文不输出，避免服务端回显秘密；通知可能包含用户名和额度，分享日志前仍应检查。
+- 本次开发未更改用户系统配置或 GPT 路由，未进行真实网络登录测试。
 
-# 2. 把改动搬进 agentrouter-checkin.js（改逻辑、接口路径、字段名等）
+## 跟随上游 Python 更新
 
-# 3. 更新基准，把 ported_sha 换成上游最新提交的完整 SHA
-#    取 SHA：git -C /tmp/ar-upstream rev-parse HEAD
+来源：[773075692/agentrouter-checkin](https://github.com/773075692/agentrouter-checkin)。Loon 不能直接运行 Python，需要人工移植 JavaScript。
 
-# 4. 递增 agentrouter-checkin.js 的 SCRIPT_VERSION、跑测试、提交推送
-cd /Users/mac/Documents/Codex/loon-scripts
-node test/smoke.js
-git add -A && git commit -m "port upstream <short-sha>" && git push
-```
+`upstream-watch.js` 每周一 10:00 读取 GitHub commits Atom feed，与 `upstream-baseline.json` 的 `ported_sha` 对比，有新提交时通知并提供比较链接。当前移植基准 `88d5f1e`（2026-08-04）。Atom feed 仍可能因网络或服务限制失败，不保证不受限流。
 
-检查脚本用的是 GitHub 的 commits **Atom feed**（`github.com/<repo>/commits/main/agentrouter_checkin.py.atom`），而不是 REST API——因为未认证的 REST API 按 IP 限速（共享出口/VPN 很容易 403），Atom feed 没有这个限制。
+重新移植时查看上游差异、修改 JS 和基准文件、递增版本号、同步插件并运行离线测试；提交发布应另行明确授权。
 
-### 安全说明
-
-- `AGENTROUTER_BASE_URL` 只允许 `http`/`https`，并拒绝 `localhost`、环回、私网（`10/8`、`172.16/12`、`192.168/16`、`100.64/10`）与保留地址，防止把账号密码发到本机或内网地址。
-- 账号密码只保存在 Loon 本地（`$persistentStore`），不会打进脚本或发往任何第三方。
-- 仓库内不含任何真实账号信息。
-
-### 本地开发
+## 本地验证与更新
 
 ```bash
-node --check agentrouter-checkin.js   # 语法检查
+node --check agentrouter-checkin.js
 node --check upstream-watch.js
-node test/smoke.js                     # 105 项逻辑 + 安全性 + 时间控制 + 重试/人机验证/兼容测试（stub 掉 Loon 运行时，不发真实请求）
+node --check test/smoke.js
+node test/smoke.js
 ```
 
-两个脚本都在文件末尾判断了运行环境：在 Loon 中自动执行，被 Node `require` 时只导出函数，便于本地测试。
+测试 stub 掉 Loon HTTP、存储、通知、时钟，不发真实请求。覆盖成功路径、手动/定时小时过滤、分开及旧凭据、重试上限、停止条件、Cookie 合并与预算，以及原有上游检查用例。
 
-### 更新机制（重要）
+更新插件后，运行 **AgentRouter手动签到**，查看日志 `AgentRouter 自动签到启动 (Loon) v1.5.0`。远程脚本及客户端缓存可能延迟更新，不承诺每次执行都实时下载新版；必要时使用客户端更新操作再核对版本。本地代码未发布前，远程 main 链接不会包含本次修改。
 
-脚本和插件都由 `main` 分支的 **raw 链接**提供，所以更新分两层：
+已有镜像插件仅同步功能配置，不作为本次安装推荐；其缓存时效不作未经核实的固定时长承诺。
 
-1. **脚本本体**：只要本仓库 `main` 分支的 `agentrouter-checkin.js` 有改动，Loon 下一次运行时拉到的就是新版——**不需要重装插件**。
-   不过 `raw.githubusercontent.com` 有约 **5 分钟** CDN 缓存（`cache-control: max-age=300`），刚推送后短时间内可能还拿到旧内容。
-2. **插件本体**：`AgentRouter.checkin.plugin`（定时时间、输入项、tag 等）若改动，需要在 Loon 里对这条插件做一次「更新」才会生效。
+## 已知限制
 
-**怎么确认当前跑的是哪一版**：脚本每次运行会在 Loon 日志里打印
-`AgentRouter 自动签到启动 (Loon) v<版本号>`；插件描述里也带同一个版本号。
-怀疑没更新时，手动触发一次脚本，看这行输出即可。
-
-> 说明：上面第 1、2 点基于 Loon 官方手册「远程 script-path 按 URL 拉取」与 GitHub raw 的实测缓存头（`max-age=300`）得出；Loon 客户端内具体是自动轮询还是需手动「更新」，官方没有公开文档，未在本机真机上实测。稳妥做法：更新插件后手动触发脚本一次，看版本号。
-
-### 说明 / 与原版的差异
-
-- 原版依赖青龙的 `notify` 模块，Loon 版改用 `$notification.post`。
-- 原版的代理、强制 IPv4 环境变量在 Loon 中由 App 自身的网络设置处理，未移植。
-- 原版的 `AGENTROUTER_BASE_URL` 环境变量在 Loon 版对应插件输入项（同样的名字）。
-- 备用域名 `ps.air-outer.com` 功能一致，可通过「站点域名[可留空]」切换。
-
-### 已知限制
-
-- 本脚本为 cron 定时类型，依赖 App 打开的定时执行机制；iOS 上建议配合 Loon 的后台定时权限使用。
-- 逻辑与安全性用 Node stub + 真实站点请求验证过（登录接口能拿到正常 JSON）；但**没有有效账号**，所以「签到成功 → 发额度 → 日志确认」这条完整成功路径未在真机跑通。首次使用建议先手动触发一次，看通知与日志。
-- 站点在阿里云 WAF 后，**出口 IP 触发风控时会弹人机验证**（脚本无法通过）。实测该拦截是临时的、由访问频率触发，停止请求几分钟后自动解除；已在插件里提供「指定节点或策略组」用于换出口。
+- 本次仅完成离线逻辑验证，未验证真机“登录 → 额度发放 → 日志确认”全链路。
+- 没有可靠的内建手动 cron 检测；必须使用独立 generic 才能绕过小时过滤。
+- 不提供验证码绕过、无限重试或网络可达性保证。
