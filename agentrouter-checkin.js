@@ -13,11 +13,13 @@
  *
  * 配置（任选其一，按下列顺序生效）：
  *   - 脚本行 argument：一个 `邮箱#密码`，或账号 JSON 数组
- *   - 插件输入 AGENTROUTER_ACCOUNTS：JSON 数组
+ *   - 插件输入「多账号[JSON数组]」：JSON 数组
  *       [{"name":"甲","account":"a@x.com#pwdA"},{"name":"乙","account":"b@x.com#pwdB"}]
  *       （兼容旧格式每项写 {"name":"...","email":"...","password":"..."}）
- *   - 插件输入 AGENTROUTER_ACCOUNT：`邮箱#密码`
- *   - 插件输入 AGENTROUTER_BASE_URL（可选）：覆盖站点域名，默认 https://agentrouter.org
+ *   - 插件输入「单账号[邮箱和密码]」：`邮箱#密码`
+ *   - 插件输入「站点域名[可留空]」（可选）：覆盖站点域名，默认 https://agentrouter.org
+ *   - 插件输入「签到时间点[可留空]」（可选）：如 "9,15,21"，只在匹配的小时签到
+ *   旧版英文键（AGENTROUTER_ACCOUNT 等）仍能读，并会自动迁移到中文键。
  *
  * 说明：
  *   - session cookie 由 Loon 的 auto-cookie 在同一 host 内自动沿用，无需手动处理。
@@ -33,16 +35,26 @@ const TIMEOUT = 20000;
 
 // 版本号：手动触发一次后，在 Loon 日志里看这行就能确认当前跑的是哪一版。
 // 更新脚本时同步递增，并同步更新 AgentRouter.checkin.plugin 的 #!desc。
-const SCRIPT_VERSION = "1.1.0";
+const SCRIPT_VERSION = "1.2.0";
 
 const DEFAULT_BASE_URL = "https://agentrouter.org";
 
-const STORE_ACCOUNT = "AGENTROUTER_ACCOUNT";
-const STORE_ACCOUNTS = "AGENTROUTER_ACCOUNTS";
-const STORE_BASE_URL = "AGENTROUTER_BASE_URL";
+// 插件输入项名称。Loon 旧式 `#!input` 没有单独的"说明"字段——方括号里的名字
+// 就是用户在插件页面看到的标签，也是本地存储的键，所以这里直接用中文，用户才看得懂。
+// 注意：插件头 `#!` 行里不能出现行内 `#`（会被当成注释），所以标签里避免用 `#`。
+const FIELD_ACCOUNT = "单账号[邮箱和密码]";
+const FIELD_ACCOUNTS = "多账号[JSON数组]";
+const FIELD_BASE_URL = "站点域名[可留空]";
 // 可选：限定只在一天中的哪些小时真正执行（配合 `0 * * * *` 的每小时 cron 用）。
 // 例如 "9,15,21" 表示每天 9/15/21 点各签到一次；留空则每次触发都执行。
-const STORE_RUN_HOURS = "AGENTROUTER_RUN_HOURS";
+const FIELD_RUN_HOURS = "签到时间点[可留空]";
+
+// 旧版（v1.1.0 及更早）的英文键名，继续兼容读取，并自动把值迁移到新键，
+// 这样老用户升级插件后不用重新填账号。
+const LEGACY_ACCOUNT = "AGENTROUTER_ACCOUNT";
+const LEGACY_ACCOUNTS = "AGENTROUTER_ACCOUNTS";
+const LEGACY_BASE_URL = "AGENTROUTER_BASE_URL";
+const LEGACY_RUN_HOURS = "AGENTROUTER_RUN_HOURS";
 
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
@@ -66,6 +78,24 @@ function readStore(key) {
   } catch (e) {
     return "";
   }
+}
+
+// 读取插件输入项：优先新中文键；没有则回退读旧英文键，并把值迁移到新键，
+// 让用户在插件页面能看到、也能继续用旧配置。
+function readField(primary, legacy) {
+  var v = readStore(primary);
+  if (v) return v;
+  var old = readStore(legacy);
+  if (old) {
+    try {
+      $persistentStore.write(String(old), primary);
+    } catch (e) {
+      /* 迁移失败不影响本次使用 */
+    }
+    log("已将旧配置 " + legacy + " 迁移到「" + primary + "」");
+    return old;
+  }
+  return "";
 }
 
 function getArgument() {
@@ -120,7 +150,7 @@ function extractQuota(payload) {
   return null;
 }
 
-// 解析 AGENTROUTER_RUN_HOURS："9,15,21" 或 "9-11"（也支持跨午夜 "22-2"）。
+// 解析「签到时间点」："9,15,21" 或 "9-11"（也支持跨午夜 "22-2"）。
 // 返回 0-23 的整数数组；无法解析的片段忽略。返回空数组表示"不做小时限制"。
 function parseRunHours(raw) {
   var found = [];
@@ -291,28 +321,28 @@ function collectAccounts() {
     }
   }
 
-  // 2) AGENTROUTER_ACCOUNTS（JSON 数组）
-  var multiRaw = readStore(STORE_ACCOUNTS).trim();
+  // 2) 多账号 JSON 数组
+  var multiRaw = readField(FIELD_ACCOUNTS, LEGACY_ACCOUNTS).trim();
   if (multiRaw) {
     var list = tryParseAccountsJson(multiRaw);
     if (list && list.length) {
-      log("已读取 AGENTROUTER_ACCOUNTS, 共 " + list.length + " 个");
+      log("已读取「" + FIELD_ACCOUNTS + "」, 共 " + list.length + " 个");
       return list;
     }
-    if (list) log("AGENTROUTER_ACCOUNTS 未解析出有效账号, 回退到单账号");
+    if (list) log("「" + FIELD_ACCOUNTS + "」未解析出有效账号, 回退到单账号");
   }
 
-  // 3) AGENTROUTER_ACCOUNT（邮箱#密码）
-  var singleRaw = readStore(STORE_ACCOUNT).trim();
+  // 3) 单账号（邮箱#密码）
+  var singleRaw = readField(FIELD_ACCOUNT, LEGACY_ACCOUNT).trim();
   if (singleRaw) {
     var one = parseAccount(singleRaw);
     if (one[0] && one[1]) {
-      log("已读取 AGENTROUTER_ACCOUNT (邮箱#密码)");
+      log("已读取「" + FIELD_ACCOUNT + "」(邮箱#密码)");
       return [{ name: "默认账号", email: one[0], password: one[1] }];
     }
   }
 
-  log("未检测到任何配置: 请设置 AGENTROUTER_ACCOUNT=邮箱#密码 或 AGENTROUTER_ACCOUNTS");
+  log("未检测到任何配置: 请在插件里填写「" + FIELD_ACCOUNT + "」(格式 邮箱#密码)");
   return [];
 }
 
@@ -444,16 +474,16 @@ async function passwordLogin(base, acc) {
 async function main() {
   log("AgentRouter 自动签到启动 (Loon) v" + SCRIPT_VERSION);
 
-  var runHours = parseRunHours(readStore(STORE_RUN_HOURS));
+  var runHours = parseRunHours(readField(FIELD_RUN_HOURS, LEGACY_RUN_HOURS));
   if (runHours.length) {
     var hour = new Date().getHours();
     if (!shouldRunNow(runHours, hour)) {
-      log("当前 " + hour + " 点不在 AGENTROUTER_RUN_HOURS(" + runHours.join(",") + ") 内，本次跳过");
+      log("当前 " + hour + " 点不在「" + FIELD_RUN_HOURS + "」(" + runHours.join(",") + ") 内，本次跳过");
       return;
     }
   }
 
-  var base = (readStore(STORE_BASE_URL) || DEFAULT_BASE_URL).trim().replace(/\/+$/, "");
+  var base = (readField(FIELD_BASE_URL, LEGACY_BASE_URL) || DEFAULT_BASE_URL).trim().replace(/\/+$/, "");
   var guard = validateBaseUrl(base);
   if (!guard.ok) {
     log("BASE_URL 校验失败: " + guard.reason);
@@ -463,7 +493,7 @@ async function main() {
 
   var accounts = collectAccounts();
   if (!accounts.length) {
-    notify("[AgentRouter] 签到失败", "未检测到账号配置，请填写 AGENTROUTER_ACCOUNT=邮箱#密码");
+    notify("[AgentRouter] 签到失败", "未检测到账号配置，请在插件里填写「" + FIELD_ACCOUNT + "」（格式 邮箱#密码）");
     return;
   }
 
@@ -530,6 +560,11 @@ if (typeof module !== "undefined" && module.exports) {
     humanAgo: humanAgo,
     parseRunHours: parseRunHours,
     shouldRunNow: shouldRunNow,
+    readField: readField,
+    FIELD_ACCOUNT: FIELD_ACCOUNT,
+    FIELD_ACCOUNTS: FIELD_ACCOUNTS,
+    FIELD_BASE_URL: FIELD_BASE_URL,
+    FIELD_RUN_HOURS: FIELD_RUN_HOURS,
     normalizeAccountsArray: normalizeAccountsArray,
     collectAccounts: collectAccounts
   };

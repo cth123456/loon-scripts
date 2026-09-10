@@ -33,35 +33,38 @@
 
 **方式一：安装插件（推荐）**
 
-在 Loon 中打开下面的链接即可安装插件，插件会创建每天 09:00 的定时任务：
+在 Loon 中打开下面的链接即可安装插件，插件会创建两个定时任务（每小时签到 + 每周一检查上游）：
 
 ```
 https://raw.githubusercontent.com/cth123456/loon-scripts/main/AgentRouter.checkin.plugin
 ```
 
-安装后在插件配置页面填入：
+安装后在插件详情页填入下面几项（**名字就是你在 Loon 里看到的标签**）：
 
-| 输入项 | 是否必填 | 说明 |
+| 插件里的名称 | 是否必填 | 填什么 |
 | --- | --- | --- |
-| `AGENTROUTER_ACCOUNT` | 单账号必填 | 格式 `邮箱#密码` |
-| `AGENTROUTER_ACCOUNTS` | 多账号可选 | JSON 数组，见下 |
-| `AGENTROUTER_BASE_URL` | 可选 | 覆盖站点域名，默认 `https://agentrouter.org` |
-| `AGENTROUTER_RUN_HOURS` | 可选 | 限定只在哪些小时真正签到，见「时间与次数」 |
+| `单账号[邮箱和密码]` | 单账号必填 | `邮箱#密码`，中间用英文 `#` 隔开 |
+| `多账号[JSON数组]` | 多账号可选 | JSON 数组，见下；填了就优先用它 |
+| `签到时间点[可留空]` | 可选 | 如 `9`、`9,15,21`、`9-18`；留空=每小时都签到 |
+| `站点域名[可留空]` | 可选 | 默认 `https://agentrouter.org`，一般不用填 |
 
-多账号示例（`AGENTROUTER_ACCOUNTS`）：
+多账号示例（`多账号[JSON数组]`）：
 
 ```json
 [{"name":"甲","account":"a@x.com#pwdA"},{"name":"乙","account":"b@x.com#pwdB"}]
 ```
 
 也兼容旧格式：`[{"name":"甲","email":"a@x.com","password":"pwdA"}]`。
-设置了 `AGENTROUTER_ACCOUNTS` 时优先使用它。
+
+> **关于字段名**：Loon 旧式插件参数（`#!input`）没有单独的"说明"字段，括号里的名字本身就是显示给用户的标签，也是本地存储的键。所以这里直接用中文。
+> 如果你之前装的是 v1.1.0 之前的版本、填的是英文键（`AGENTROUTER_ACCOUNT` 等），**升级后会继续读取旧值并自动迁移到中文键**，不用重填。
+> 新版 Loon（build 733+）有带 `tag=` / `desc=` 的 `[Argument]` 段，能更好地区分"键名"和"显示名"，但本机 Loon 是 0.4.0 build 81，用不了，故仍用 `#!input` 中文标签方案。
 
 ### 时间与次数（cron 自定义）
 
-签到任务的 cron 由插件写死为 **每小时整点**（`0 * * * *`），具体"每天几点签到、一天几次"由 `AGENTROUTER_RUN_HOURS` 决定：
+签到任务的 cron 由插件写死为 **每小时整点**（`0 * * * *`），具体"每天几点签到、一天几次"由 `签到时间点[可留空]` 决定：
 
-| `AGENTROUTER_RUN_HOURS` | 效果 |
+| 签到时间点 | 效果 |
 | --- | --- |
 | 留空 / 不填 | 每小时都签到（一天 24 次） |
 | `9` | 只在北京时间 09:00 签到（等于原来的每天一次） |
@@ -85,8 +88,8 @@ cron "0 10 * * 1" script-path=https://raw.githubusercontent.com/cth123456/loon-s
 ```
 
 `argument` 支持单个 `邮箱#密码`，也支持直接填账号 JSON 数组。
-优先级：`argument` > `AGENTROUTER_ACCOUNTS` > `AGENTROUTER_ACCOUNT`。
-只用 `argument` 时无法配置 `AGENTROUTER_RUN_HOURS`（那是插件输入项），需要限时请走插件方式。
+优先级：`argument` > `多账号[JSON数组]` > `单账号[邮箱和密码]`。
+只用 `argument` 时无法配置 `签到时间点`（那是插件输入项），需要限时请走插件方式。
 
 ### 跟随上游 Python 更新
 
@@ -131,7 +134,7 @@ git add -A && git commit -m "port upstream <short-sha>" && git push
 ```bash
 node --check agentrouter-checkin.js   # 语法检查
 node --check upstream-watch.js
-node test/smoke.js                     # 69 项逻辑 + 安全性 + 时间控制测试（stub 掉 Loon 运行时，不发真实请求）
+node test/smoke.js                     # 73 项逻辑 + 安全性 + 时间控制 + 参数兼容测试（stub 掉 Loon 运行时，不发真实请求）
 ```
 
 两个脚本都在文件末尾判断了运行环境：在 Loon 中自动执行，被 Node `require` 时只导出函数，便于本地测试。

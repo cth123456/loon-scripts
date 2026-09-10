@@ -13,6 +13,12 @@ const checkin = require("../agentrouter-checkin.js");
 const watch = require("../upstream-watch.js");
 
 // ------------------------------------------------------------ mock 基础设施
+const F = {
+  ACCOUNT: checkin.FIELD_ACCOUNT,
+  ACCOUNTS: checkin.FIELD_ACCOUNTS,
+  BASE_URL: checkin.FIELD_BASE_URL,
+  RUN_HOURS: checkin.FIELD_RUN_HOURS,
+};
 const state = { logs: [], notifications: [], done: false, requests: [], store: {} };
 let spec = {};
 const RealDate = Date;
@@ -94,7 +100,7 @@ const CHECKIN_CASES = [
   {
     name: "happy path：登录成功 + 日志确认（new）",
     spec: {
-      store: { AGENTROUTER_ACCOUNT: "a@x.com#pwdA" },
+      store: { [F.ACCOUNT]: "a@x.com#pwdA" },
       responder: {
         post: () => loginOk(),
         get: (p) => {
@@ -107,18 +113,31 @@ const CHECKIN_CASES = [
     expect: {
       title: "[AgentRouter] 签到汇总",
       content: ["✅", "签到成功，日志已确认", "额度 12345"],
-      logs: ["已读取 AGENTROUTER_ACCOUNT", "✅ 成功"],
+      logs: ["已读取「" + F.ACCOUNT + "」", "✅ 成功"],
+    },
+  },
+  {
+    name: "旧英文键 AGENTROUTER_ACCOUNT 仍可用，且迁移到中文键",
+    spec: {
+      store: { AGENTROUTER_ACCOUNT: "a@x.com#pwdA" },
+      responder: { post: () => loginOk({ checked_in: false }) },
+    },
+    expect: {
+      title: "[AgentRouter] 签到汇总",
+      content: ["checked_in=false"],
+      logs: ["已将旧配置 AGENTROUTER_ACCOUNT 迁移到「" + F.ACCOUNT + "」"],
+      storeHas: { [F.ACCOUNT]: "a@x.com#pwdA" },
     },
   },
   {
     name: "checked_in=false：登录成功但今日额度已发",
-    spec: { store: { AGENTROUTER_ACCOUNT: "a@x.com#pwdA" }, responder: { post: () => loginOk({ checked_in: false }) } },
+    spec: { store: { [F.ACCOUNT]: "a@x.com#pwdA" }, responder: { post: () => loginOk({ checked_in: false }) } },
     expect: { title: "[AgentRouter] 签到汇总", content: ["checked_in=false"] },
   },
   {
     name: "日志接口 500：核验失败但不影响登录结论（仍 success）",
     spec: {
-      store: { AGENTROUTER_ACCOUNT: "a@x.com#pwdA" },
+      store: { [F.ACCOUNT]: "a@x.com#pwdA" },
       responder: { post: () => loginOk(), get: () => ({ resp: { status: 500, headers: {} }, data: "" }) },
     },
     expect: { title: "[AgentRouter] 签到汇总", content: ["✅", "日志未确认", "HTTP 500"] },
@@ -126,7 +145,7 @@ const CHECKIN_CASES = [
   {
     name: "登录接口返回 HTML（WAF）",
     spec: {
-      store: { AGENTROUTER_ACCOUNT: "a@x.com#pwdA" },
+      store: { [F.ACCOUNT]: "a@x.com#pwdA" },
       responder: { post: () => ({ resp: { status: 200, headers: { "content-type": "text/html" } }, data: "<html>x</html>" }) },
     },
     expect: { title: "[AgentRouter] 签到汇总", content: ["❌", "返回 HTML"] },
@@ -134,26 +153,26 @@ const CHECKIN_CASES = [
   {
     name: "登录响应非 JSON",
     spec: {
-      store: { AGENTROUTER_ACCOUNT: "a@x.com#pwdA" },
+      store: { [F.ACCOUNT]: "a@x.com#pwdA" },
       responder: { post: () => ({ resp: { status: 200, headers: {} }, data: "not json" }) },
     },
     expect: { title: "[AgentRouter] 签到汇总", content: ["❌", "非 JSON"] },
   },
   {
     name: "登录 success=false",
-    spec: { store: { AGENTROUTER_ACCOUNT: "a@x.com#pwdA" }, responder: { post: () => jsonResp(200, { success: false, message: "密码错误" }) } },
+    spec: { store: { [F.ACCOUNT]: "a@x.com#pwdA" }, responder: { post: () => jsonResp(200, { success: false, message: "密码错误" }) } },
     expect: { title: "[AgentRouter] 签到汇总", content: ["❌", "登录失败", "密码错误"] },
   },
   {
     name: "网络异常：登录请求超时",
-    spec: { store: { AGENTROUTER_ACCOUNT: "a@x.com#pwdA" }, responder: { post: () => ({ error: "timeout" }) } },
+    spec: { store: { [F.ACCOUNT]: "a@x.com#pwdA" }, responder: { post: () => ({ error: "timeout" }) } },
     expect: { title: "[AgentRouter] 签到汇总", content: ["❌", "登录请求异常"] },
   },
   {
     name: "多账号 JSON + 旧格式兼容 + 额度分别取值",
     spec: {
       store: {
-        AGENTROUTER_ACCOUNTS: JSON.stringify([
+        [F.ACCOUNTS]: JSON.stringify([
           { name: "甲", account: "a@x.com#pwdA" },
           { name: "乙", email: "b@x.com", password: "pwdB" },
         ]),
@@ -166,7 +185,7 @@ const CHECKIN_CASES = [
         get: () => logResp([{ content: "签到成功", type: 4, created_at: nowSec() }]),
       },
     },
-    expect: { title: "[AgentRouter] 签到汇总", content: ["✅ 甲", "✅ 乙", "额度 1", "额度 2"], logs: ["共 2 个"] },
+    expect: { title: "[AgentRouter] 签到汇总", content: ["✅ 甲", "✅ 乙", "额度 1", "额度 2"], logs: ["已读取「" + F.ACCOUNTS + "」, 共 2 个"] },
   },
   {
     name: "脚本行 argument 单账号",
@@ -179,57 +198,57 @@ const CHECKIN_CASES = [
     expect: { title: "[AgentRouter] 签到失败", content: ["未检测到账号配置"] },
   },
   {
-    name: "时间次数：RUN_HOURS=9,15,21 且当前 10 点 → 跳过、不请求",
-    spec: { store: { AGENTROUTER_ACCOUNT: "a@x.com#pwdA", AGENTROUTER_RUN_HOURS: "9,15,21" }, hour: 10, responder: {} },
-    expect: { noNotify: true, logs: ["不在 AGENTROUTER_RUN_HOURS"], noRequests: true },
+    name: "时间次数：签到时间点=9,15,21 且当前 10 点 → 跳过、不请求",
+    spec: { store: { [F.ACCOUNT]: "a@x.com#pwdA", [F.RUN_HOURS]: "9,15,21" }, hour: 10, responder: {} },
+    expect: { noNotify: true, logs: ["不在「" + F.RUN_HOURS + "」"], noRequests: true },
   },
   {
-    name: "时间次数：RUN_HOURS=9,15,21 且当前 15 点 → 执行",
+    name: "时间次数：签到时间点=9,15,21 且当前 15 点 → 执行",
     spec: {
-      store: { AGENTROUTER_ACCOUNT: "a@x.com#pwdA", AGENTROUTER_RUN_HOURS: "9,15,21" },
+      store: { [F.ACCOUNT]: "a@x.com#pwdA", [F.RUN_HOURS]: "9,15,21" },
       hour: 15,
       responder: { post: () => loginOk({ checked_in: false }) },
     },
     expect: { title: "[AgentRouter] 签到汇总", content: ["checked_in=false"] },
   },
   {
-    name: "时间次数：RUN_HOURS=9-11 区间，当前 10 点 → 执行",
+    name: "时间次数：区间 9-11，当前 10 点 → 执行",
     spec: {
-      store: { AGENTROUTER_ACCOUNT: "a@x.com#pwdA", AGENTROUTER_RUN_HOURS: "9-11" },
+      store: { [F.ACCOUNT]: "a@x.com#pwdA", [F.RUN_HOURS]: "9-11" },
       hour: 10,
       responder: { post: () => loginOk({ checked_in: false }) },
     },
     expect: { title: "[AgentRouter] 签到汇总", content: ["checked_in=false"] },
   },
   {
-    name: "时间次数：RUN_HOURS 留空 → 不做限制，每次触发都执行",
-    spec: { store: { AGENTROUTER_ACCOUNT: "a@x.com#pwdA", AGENTROUTER_RUN_HOURS: "" }, hour: 3, responder: { post: () => loginOk({ checked_in: false }) } },
+    name: "时间次数：留空 → 不做限制，每次触发都执行",
+    spec: { store: { [F.ACCOUNT]: "a@x.com#pwdA", [F.RUN_HOURS]: "" }, hour: 3, responder: { post: () => loginOk({ checked_in: false }) } },
     expect: { title: "[AgentRouter] 签到汇总", content: ["checked_in=false"] },
   },
   {
     name: "安全性：127.0.0.1 被拒绝",
-    spec: { store: { AGENTROUTER_ACCOUNT: "a@x.com#pwdA", AGENTROUTER_BASE_URL: "http://127.0.0.1:8080" }, responder: {} },
+    spec: { store: { [F.ACCOUNT]: "a@x.com#pwdA", [F.BASE_URL]: "http://127.0.0.1:8080" }, responder: {} },
     expect: { title: "[AgentRouter] 签到失败", content: ["BASE_URL 不合法"] },
   },
   {
     name: "安全性：localhost 被拒绝",
-    spec: { store: { AGENTROUTER_ACCOUNT: "a@x.com#pwdA", AGENTROUTER_BASE_URL: "http://localhost:3000" }, responder: {} },
+    spec: { store: { [F.ACCOUNT]: "a@x.com#pwdA", [F.BASE_URL]: "http://localhost:3000" }, responder: {} },
     expect: { title: "[AgentRouter] 签到失败", content: ["BASE_URL 不合法"] },
   },
   {
     name: "安全性：192.168.x 内网被拒绝",
-    spec: { store: { AGENTROUTER_ACCOUNT: "a@x.com#pwdA", AGENTROUTER_BASE_URL: "http://192.168.1.10" }, responder: {} },
+    spec: { store: { [F.ACCOUNT]: "a@x.com#pwdA", [F.BASE_URL]: "http://192.168.1.10" }, responder: {} },
     expect: { title: "[AgentRouter] 签到失败", content: ["BASE_URL 不合法"] },
   },
   {
     name: "安全性：ftp:// 协议被拒绝",
-    spec: { store: { AGENTROUTER_ACCOUNT: "a@x.com#pwdA", AGENTROUTER_BASE_URL: "ftp://agentrouter.org" }, responder: {} },
+    spec: { store: { [F.ACCOUNT]: "a@x.com#pwdA", [F.BASE_URL]: "ftp://agentrouter.org" }, responder: {} },
     expect: { title: "[AgentRouter] 签到失败", content: ["BASE_URL 不合法"] },
   },
   {
     name: "备用公网域名通过校验，URL 末尾斜杠被规范化",
     spec: {
-      store: { AGENTROUTER_ACCOUNT: "a@x.com#pwdA", AGENTROUTER_BASE_URL: "https://ps.air-outer.com/" },
+      store: { [F.ACCOUNT]: "a@x.com#pwdA", [F.BASE_URL]: "https://ps.air-outer.com/" },
       responder: {
         post: (p) => {
           assert.strictEqual(p.url, "https://ps.air-outer.com/api/user/login");
@@ -241,7 +260,7 @@ const CHECKIN_CASES = [
   },
   {
     name: "runOnce：运行时入口最终调用 $done()",
-    spec: { store: { AGENTROUTER_ACCOUNT: "a@x.com#pwdA" }, responder: { post: () => loginOk({ checked_in: false }) } },
+    spec: { store: { [F.ACCOUNT]: "a@x.com#pwdA" }, responder: { post: () => loginOk({ checked_in: false }) } },
     runOnce: true,
     expect: { done: true, title: "[AgentRouter] 签到汇总" },
   },
@@ -379,6 +398,12 @@ function unitTests() {
   t.push(["compareUrl 含 from/to", /compare\/aaa\.\.\.bbb/.test(watch.compareUrl("aaa", "bbb"))]);
   t.push(["compareUrl 缺参数退回 commits 页", /\/commits\/main$/.test(watch.compareUrl("", "bbb"))]);
 
+  // 输入项名称：必须是中文（用户能看懂），且不能含 `#`（会截断插件 #! 行）
+  const fields = [checkin.FIELD_ACCOUNT, checkin.FIELD_ACCOUNTS, checkin.FIELD_BASE_URL, checkin.FIELD_RUN_HOURS];
+  t.push(["输入项名称含中文字符", fields.every((f) => /[\u4e00-\u9fa5]/.test(f))]);
+  t.push(["输入项名称不含 # ", fields.every((f) => f.indexOf("#") < 0)]);
+  t.push(["输入项名称互不相同", new Set(fields).size === fields.length]);
+
   return t;
 }
 
@@ -416,6 +441,11 @@ function checkExpect(c, threw) {
   if (exp.logs) for (const s of exp.logs) if (logsAll.indexOf(s) < 0) problems.push(`日志缺少「${s}」`);
   if (exp.done === true && state.done !== true) problems.push("未调用 $done()");
   if (exp.noRequests && state.requests.length) problems.push("不应发请求但发了 " + state.requests.length + " 个");
+  if (exp.storeHas) {
+    for (const k of Object.keys(exp.storeHas)) {
+      if (state.store[k] !== exp.storeHas[k]) problems.push(`存储键「${k}」期望「${exp.storeHas[k]}」实际「${state.store[k]}」`);
+    }
+  }
   return problems;
 }
 
