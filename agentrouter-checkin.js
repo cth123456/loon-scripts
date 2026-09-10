@@ -36,7 +36,7 @@ const TIMEOUT = 20000;
 
 // 版本号：手动触发一次后，在 Loon 日志里看这行就能确认当前跑的是哪一版。
 // 更新脚本时同步递增，并同步更新 AgentRouter.checkin.plugin 的 #!desc。
-const SCRIPT_VERSION = "1.4.0";
+const SCRIPT_VERSION = "1.4.1";
 
 const DEFAULT_BASE_URL = "https://agentrouter.org";
 
@@ -46,8 +46,11 @@ const DEFAULT_BASE_URL = "https://agentrouter.org";
 const FIELD_ACCOUNT = "单账号[邮箱和密码]";
 const FIELD_ACCOUNTS = "多账号[JSON数组]";
 const FIELD_BASE_URL = "站点域名[可留空]";
-// 可选：限定只在一天中的哪些小时真正执行（配合 `0 * * * *` 的每小时 cron 用）。
-// 例如 "9,15,21" 表示每天 9/15/21 点各签到一次；留空则每次触发都执行。
+// 可选：限定只在一天中的哪些小时真正执行。
+// 默认任务 cron 是每天一次（0 9 * * *），此时本项留空即可；
+// 若把 cron 改成每小时（0 * * * *）想一天多次，用它限定具体小时，
+// 例如 "9,15,21"；留空则每次触发都执行。站点本身按天去重，一天一次就够，
+// 频次过高反而容易触发 WAF 风控，所以默认保持每天一次。
 const FIELD_RUN_HOURS = "签到时间点[可留空]";
 // 可选：指定这些请求走哪个节点/策略组（Loon $httpClient 的 node 参数）。
 // 站点挂在阿里云 WAF 后，若经由机房出口的代理节点访问，容易被判为机器人并弹人机验证；

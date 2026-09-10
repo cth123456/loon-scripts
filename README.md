@@ -97,28 +97,34 @@ https://raw.githubusercontent.com/cth123456/loon-scripts/main/AgentRouter.checki
 
 ### 时间与次数（cron 自定义）
 
-签到任务的 cron 由插件写死为 **每小时整点**（`0 * * * *`），具体"每天几点签到、一天几次"由 `签到时间点[可留空]` 决定：
+默认是**每天 09:00 运行一次**（`cron "0 9 * * *"`）。
 
-| 签到时间点 | 效果 |
+> 建议就保持默认。站点本身**按天去重**，一天签一次就够；而访问频次过高会被阿里云 WAF
+> 判为机器人、弹人机验证（实测：连续高频请求就会触发）。所以默认从"每小时"改回了"每天一次"。
+
+**想一天多次**：把插件里那行签到任务的 `cron "0 9 * * *"` 改成 `cron "0 * * * *"`（每小时唤醒），
+再用 `签到时间点[可留空]` 指定具体几点真正执行：
+
+| 签到时间点 | 效果（cron 为每小时时） |
 | --- | --- |
-| 留空 / 不填 | 每小时都签到（一天 24 次） |
-| `9` | 只在北京时间 09:00 签到（等于原来的每天一次） |
-| `9,15,21` | 每天 9 点、15 点、21 点各签到一次 |
-| `9-18` | 每天 9 点到 18 点之间的整点各一次 |
+| 留空 / 不填 | 每小时都签到（一天 24 次，不利风控，不建议） |
+| `9` | 只在 09:00 签到（等价默认值） |
+| `9,15,21` | 每天 9 / 15 / 21 点各一次 |
+| `9-18` | 9 点到 18 点之间的整点各一次 |
 | `22-2` | 支持跨午夜区间 |
 
 不在列表里的小时，脚本会直接跳过并发一行日志，不发通知、不发请求。
 注意：用的是 **Loon 运行设备上的本地时间**（通常就是北京时间）。
 
-**要改 cron 本身的节奏**（比如改成每 30 分钟、或隔天一次），就改插件里那行 `cron "0 * * * *"`：
-格式是 `分 时 日 月 周`（五段），`0 * * * *` 是每小时、`*/30 * * * *` 是每 30 分钟、`0 9 * * 1,3,5` 是每周一三五 9 点。
+**要改 cron 本身的节奏**（每 30 分钟、隔天一次等）就改那行 cron：
+格式是 `分 时 日 月 周`（五段），`0 9 * * *` 是每天 9 点、`0 * * * *` 是每小时、`*/30 * * * *` 是每 30 分钟、`0 9 * * 1,3,5` 是每周一三五 9 点。
 
 **方式二：手动加定时脚本**
 
 在配置的 `[Script]` 段加入：
 
 ```ini
-cron "0 * * * *" script-path=https://raw.githubusercontent.com/cth123456/loon-scripts/main/agentrouter-checkin.js, tag=AgentRouter签到, enable=true, timeout=60, argument = "邮箱#密码"
+cron "0 9 * * *" script-path=https://raw.githubusercontent.com/cth123456/loon-scripts/main/agentrouter-checkin.js, tag=AgentRouter签到, enable=true, timeout=120, argument = "邮箱#密码"
 cron "0 10 * * 1" script-path=https://raw.githubusercontent.com/cth123456/loon-scripts/main/upstream-watch.js, tag=AgentRouter上游检查, enable=true, timeout=60
 ```
 
