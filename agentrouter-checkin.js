@@ -34,14 +34,15 @@ const LOGIN_PATH = "/api/user/login";
 const SELF_LOG_PATH = "/api/log/self";
 const SELF_LOG_HEADER = "New-API-User";
 const CHECKIN_LOG_TYPE = 4;
-const TIMEOUT = 10000; // $httpClient timeout 单位为毫秒
+const TIMEOUT = 20000; // $httpClient timeout 单位为毫秒
 const MAX_ATTEMPTS = 10;
-const ACCOUNT_BUDGET = 90000;
-const RUN_BUDGET = 110000; // 留出通知与 $done 的余量（插件 timeout=120 秒）
+const ATTEMPT_GAP = 8000; // 每次失败后的间隔：拉开时间等风控放松，避免高频连打加重风控
+const ACCOUNT_BUDGET = 250000; // 单账号最坏 10×20s 请求 + 9×8s 间隔 ≈ 227s
+const RUN_BUDGET = 290000; // 留出通知与 $done 的余量（插件 timeout=300 秒）
 
 // 版本号：手动触发一次后，在 Loon 日志里看这行就能确认当前跑的是哪一版。
 // 更新脚本时同步递增，并同步更新 AgentRouter.checkin.plugin 的 #!desc。
-const SCRIPT_VERSION = "1.5.1";
+const SCRIPT_VERSION = "1.5.2";
 
 const DEFAULT_BASE_URL = "https://agentrouter.org";
 
@@ -341,16 +342,6 @@ function mergeCookies(current, incoming) {
   return Object.keys(jar).map(function (key) { return key + "=" + jar[key]; }).join("; ");
 }
 
-function safetyStop(status, body) {
-  if (isCaptchaPage(body) || /captcha|人机验证|验证码|滑块|turnstile/i.test(body))
-    return "站点要求人机验证，脚本不尝试绕过，停止重试；请通过站点官方页面处理";
-  if (/密码错误|密码不正确|账号.*错误|用户不存在|账户.*锁定|invalid.*(credential|password)|incorrect.*(password|credential)|wrong password/i.test(body))
-    return "登录失败：凭据错误或账号受限，停止重试，请核对账号密码";
-  if (status === 401 || status === 403 || status === 429)
-    return "登录失败：HTTP " + status + "，认证拒绝或限流，停止重试";
-  return "";
-}
-
 async function warmUp(base, node, deadline) {
   var h = {};
   for (var k in BROWSER_HEADERS) h[k] = BROWSER_HEADERS[k];
@@ -360,21 +351,10 @@ async function warmUp(base, node, deadline) {
   h["Sec-Fetch-Site"] = "none";
   try {
     var r = await httpGet(base + "/login", h, node, deadline);
-    // 普通登录 HTML 可能自带 captcha 组件代码，不把单词出现等同于挑战。
-    var warmBody = String(r.data || "");
-    var warmMessage = "";
-    try { warmMessage = String(JSON.parse(warmBody).message || ""); } catch (ignore) {}
-    var stop = safetyStop(Number(r.resp.status), isCaptchaPage(warmBody) ? "人机验证" : warmMessage);
-    if (stop) {
-      var error = new Error(stop);
-      error.stopRetry = true;
-      throw error;
-    }
     var cookie = extractCookies(r.resp.headers);
     log("会话预热: GET /login -> HTTP " + r.resp.status + (cookie ? "，已取得 cookie" : ""));
     return cookie;
   } catch (e) {
-    if (e.stopRetry) throw e;
     log("会话预热失败(不影响后续): " + (e && e.message ? e.message : e));
     return "";
   }
@@ -544,13 +524,14 @@ async function passwordLogin(base, acc, node, runDeadline) {
   log("====== 开始处理账号(账号密码登录): " + name + " ======");
 
   var deadline = Math.min(Date.now() + ACCOUNT_BUDGET, runDeadline);
-  var cookie = "", j = null, lastError = "登录未完成";
+  var cookie = "", j = null, lastError = "登录未完成", attemptsUsed = 0;
   try {
-    cookie = await warmUp(base, node, deadline);
     for (var attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      if (Date.now() >= deadline) { lastError = "时间预算已耗尽"; break; }
-      var retry = false;
+      if (Date.now() >= deadline) { lastError = "时间预算已耗尽"; attemptsUsed = attempt - 1; break; }
+      attemptsUsed = attempt;
       try {
+        // 每次尝试前都刷新会话：上次失败可能烧掉了 cookie；GET 同时兼作连通性探测
+        cookie = mergeCookies(cookie, await warmUp(base, node, deadline));
         var r = await httpPostJson(base + LOGIN_PATH, loginHeaders(base, cookie),
           { username: email, password: password }, node, deadline);
         cookie = mergeCookies(cookie, extractCookies(r.resp.headers));
@@ -559,39 +540,49 @@ async function passwordLogin(base, acc, node, runDeadline) {
         var isHtml = /text\/html/i.test(headerGet(r.resp.headers, "content-type")) || /^\s*</.test(bodyText);
         var payload = null;
         try { payload = JSON.parse(bodyText); } catch (ignore) {}
-        // 仅检查错误消息，避免成功响应中的用户名等包含 captcha 时误判。
-        var stop = safetyStop(status, isHtml ? bodyText : String(payload && payload.message || bodyText));
         if (payload && payload.success === true && status >= 200 && status < 300) {
           j = payload;
-          break; // 登录成功立即停止 POST，日志失败也不重新登录
+          break; // 登录成功立即停止，日志失败也不重新登录
         }
-        if (stop) return makeResult(name, "fail", stop, null, null);
-        if (status >= 500 && status <= 599) {
-          lastError = "服务端暂时不可用(HTTP " + status + ")，请稍后重试";
-          log("第 " + attempt + " 次登录: HTTP " + status + "（服务端暂时不可用）");
-          retry = true;
-        } else if (isHtml && status >= 200 && status < 300) {
-          lastError = "登录接口返回 HTML(疑似被 WAF 拦截)，页面标题: " + (htmlTitle(bodyText) || "(无)");
-          log("第 " + attempt + " 次登录返回 HTML: HTTP " + status);
-          retry = true;
+        // 服务器明确说凭据错误：确定性失败，重试无意义且有锁号风险，首次即停
+        if (payload && payload.success === false &&
+            /密码|credential|password/i.test(String(payload.message || ""))) {
+          return makeResult(name, "fail",
+            "登录失败：" + (payload.message || "凭据错误") + "（确定性失败，未重试；请核对账号密码）",
+            null, null);
+        }
+        // 其余失败（人机验证页/断连/5xx/限流/非 JSON）都算环境性失败：重试
+        if (status >= 500) {
+          lastError = "服务端暂时不可用(HTTP " + status + ")";
+        } else if (isHtml) {
+          lastError = "登录接口返回 HTML" + (isCaptchaPage(bodyText) ? "（人机验证页）" : "(疑似被 WAF 拦截)") +
+            "，页面标题: " + (htmlTitle(bodyText) || "(无)");
+        } else if (payload) {
+          lastError = "登录失败：服务端未确认成功(HTTP " + status + ")";
         } else {
-          // 未知业务失败也不盲目重试，避免锁号；不输出可能回显秘密的正文。
-          lastError = payload ? "登录失败：服务端未确认成功，请核对配置或稍后再试" : "登录响应非 JSON";
+          lastError = "登录响应非 JSON(HTTP " + status + ")";
         }
+        log("第 " + attempt + "/" + MAX_ATTEMPTS + " 次登录失败: " + lastError);
       } catch (e) {
         lastError = "登录请求异常: " + e.message;
-        retry = !e.stopRetry;
+        log("第 " + attempt + "/" + MAX_ATTEMPTS + " 次登录失败: " + lastError);
+        // watchdog 触发 = Loon 回调挂起，底层请求可能仍在飞行；继续重试会堆叠登录，停止本账号。
+        if (e.stopRetry) throw e;
       }
-      if (!retry || attempt === MAX_ATTEMPTS) break;
-      var wait = 3000;
-      if (Date.now() + wait >= deadline) { lastError = "时间预算已耗尽"; break; }
-      log("等待 3 秒后重试…");
-      await sleep(wait);
+      if (attempt === MAX_ATTEMPTS) break;
+      if (Date.now() + ATTEMPT_GAP >= deadline) { lastError = "时间预算已耗尽"; break; }
+      log("等待 8 秒后刷新会话重试…");
+      await sleep(ATTEMPT_GAP);
     }
   } catch (e) {
     lastError = e.message;
   }
-  if (!j) return makeResult(name, "fail", lastError, null, null);
+  if (!j) {
+    var prefix = attemptsUsed >= MAX_ATTEMPTS
+      ? "连续 " + MAX_ATTEMPTS + " 次登录未成功："
+      : "第 " + attemptsUsed + " 次后中止：";
+    return makeResult(name, "fail", prefix + lastError, null, null);
+  }
 
   var data = j.data || {};
   var checkedIn = !!data.checked_in;

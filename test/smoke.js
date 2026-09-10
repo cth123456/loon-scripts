@@ -78,7 +78,7 @@ globalThis.$httpClient = {
 
 function dispatch(method, params, cb) {
   state.requests.push({ method, url: params.url, headers: params.headers, body: params.body, node: params.node, timeout: params.timeout });
-  if (/agentrouter.org/.test(params.url)) assert(params.timeout > 0 && params.timeout <= 10000);
+  if (/agentrouter.org/.test(params.url)) assert(params.timeout > 0 && params.timeout <= 20000);
   if (spec.hangPost && method === "post") return;
   if (spec.advance) clock += Math.min(spec.advance, params.timeout);
   const seq = method === "post" ? spec.postSeq : null;
@@ -169,8 +169,9 @@ const CHECKIN_CASES = [
     expect: {
       title: "[AgentRouter] 签到汇总",
       content: ["✅"],
-      logs: ["第 1 次登录返回 HTML", "等待 3 秒后重试…"],
+      logs: ["第 1/10 次登录失败", "等待 8 秒后刷新会话重试"],
       postCount: 2,
+      getCount: 3,
     },
   },
   {
@@ -194,11 +195,11 @@ const CHECKIN_CASES = [
     expect: {
       title: "[AgentRouter] 签到汇总",
       content: ["✅"],
-      logs: ["HTTP 503（服务端暂时不可用）", "等待 3 秒后重试"],
+      logs: ["第 1/10 次登录失败: 服务端暂时不可用(HTTP 503)", "等待 8 秒后刷新会话重试"],
     },
   },
   {
-    name: "服务端持续 5xx：明确报「稍后重试」，不误判成 WAF",
+    name: "服务端持续 5xx：试满 10 次后结束",
     spec: {
       store: { [F.ACCOUNT]: "a@x.com#pwdA" },
       responder: {
@@ -214,8 +215,8 @@ const CHECKIN_CASES = [
     },
     expect: {
       title: "[AgentRouter] 签到汇总",
-      content: ["❌", "服务端暂时不可用(HTTP 503)，请稍后重试"],
-      logs: ["第 10 次登录: HTTP 503"],
+      content: ["❌", "连续 10 次登录未成功：服务端暂时不可用(HTTP 503)"],
+      logs: ["第 10/10 次登录失败: 服务端暂时不可用(HTTP 503)"],
       postCount: 10,
     },
   },
@@ -236,13 +237,13 @@ const CHECKIN_CASES = [
     },
     expect: {
       title: "[AgentRouter] 签到汇总",
-      content: ["❌", "疑似被 WAF 拦截", "安全拦截"],
-      logs: ["第 1 次登录返回 HTML", "第 10 次登录返回 HTML"],
+      content: ["❌", "连续 10 次登录未成功", "疑似被 WAF 拦截", "安全拦截"],
+      logs: ["第 1/10 次登录失败: 登录接口返回 HTML(疑似被 WAF 拦截)", "第 10/10 次登录失败"],
       postCount: 10,
     },
   },
   {
-    name: "预热人机验证页：立即失败、不发登录 POST",
+    name: "预热返回验证页：不中止流程，POST 照常重试",
     spec: {
       store: { [F.ACCOUNT]: "a@x.com#pwdA" },
       responder: {
@@ -261,8 +262,9 @@ const CHECKIN_CASES = [
     },
     expect: {
       title: "[AgentRouter] 签到汇总",
-      content: ["❌", "人机验证", "停止重试"],
-      postCount: 0,
+      content: ["❌", "连续 10 次登录未成功", "人机验证页"],
+      postCount: 10,
+      getCount: 10,
     },
   },
   {
@@ -310,25 +312,25 @@ const CHECKIN_CASES = [
     expect: { title: "[AgentRouter] 签到汇总", content: ["✅", "日志未确认", "HTTP 500"] },
   },
   {
-    name: "登录接口返回 HTML（WAF）",
+    name: "登录接口返回 HTML（WAF）：试满 10 次",
     spec: {
       store: { [F.ACCOUNT]: "a@x.com#pwdA" },
       responder: { post: () => ({ resp: { status: 200, headers: { "content-type": "text/html" } }, data: "<html>x</html>" }) },
     },
-    expect: { title: "[AgentRouter] 签到汇总", content: ["❌", "返回 HTML"] },
+    expect: { title: "[AgentRouter] 签到汇总", content: ["❌", "连续 10 次登录未成功", "返回 HTML"], postCount: 10 },
   },
   {
-    name: "登录响应非 JSON",
+    name: "登录响应非 JSON：试满 10 次",
     spec: {
       store: { [F.ACCOUNT]: "a@x.com#pwdA" },
       responder: { post: () => ({ resp: { status: 200, headers: {} }, data: "not json" }) },
     },
-    expect: { title: "[AgentRouter] 签到汇总", content: ["❌", "非 JSON"] },
+    expect: { title: "[AgentRouter] 签到汇总", content: ["❌", "连续 10 次登录未成功", "非 JSON"], postCount: 10 },
   },
   {
-    name: "登录 success=false",
+    name: "登录 success=false 且为凭据错误：首次即停",
     spec: { store: { [F.ACCOUNT]: "a@x.com#pwdA" }, responder: { post: () => jsonResp(200, { success: false, message: "密码错误" }) } },
-    expect: { title: "[AgentRouter] 签到汇总", content: ["❌", "登录失败", "凭据错误"], postCount: 1 },
+    expect: { title: "[AgentRouter] 签到汇总", content: ["❌", "登录失败", "密码错误", "确定性失败"], postCount: 1 },
   },
   {
     name: "网络异常：登录请求超时",
@@ -452,11 +454,11 @@ for (const [argument, hour] of [["", 18], ["manual", 18], ["scheduled", 18], [""
 for (const [name, seq, expected] of [
   ["网络失败后成功", [{ error: "timeout" }, loginOk({ checked_in: false })], 2],
   ["第十次成功立即停止", [...Array(9).fill(jsonResp(503, {})), loginOk({ checked_in: false })], 10],
-  ["JSON captcha 不重试", [jsonResp(200, { success: false, message: "captcha required" }), loginOk()], 1],
-  ["HTML captcha 不重试", [{ resp: { status: 503, headers: {} }, data: '<html>aliyun_waf_aa</html>' }, loginOk()], 1],
+  ["JSON captcha 也重试", [...Array(9).fill(jsonResp(200, { success: false, message: "captcha required" })), loginOk()], 10],
+  ["HTML captcha 也重试", [...Array(9).fill({ resp: { status: 503, headers: {} }, data: '<html>aliyun_waf_aa</html>' }), loginOk()], 10],
   ["明确密码错误不重试", [jsonResp(500, { success: false, message: "invalid credentials" }), loginOk()], 1],
-  ["限流不重试", [jsonResp(429, {}), loginOk()], 1],
-  ["认证拒绝不重试", [jsonResp(403, {}), loginOk()], 1],
+  ["限流也重试", [...Array(9).fill(jsonResp(429, {})), loginOk()], 10],
+  ["认证拒绝也重试", [...Array(9).fill(jsonResp(403, {})), loginOk()], 10],
 ]) {
   CHECKIN_CASES.push({ name, spec: { store: accountStore, responder: { get: warm }, postSeq: seq }, expect: { postCount: expected, title: "[AgentRouter] 签到汇总" } });
 }
@@ -467,16 +469,21 @@ CHECKIN_CASES.push(
     assert.strictEqual(JSON.parse(p.body).password, " p#a#ss "); return loginOk({ checked_in: false });
   } } }, expect: { postCount: 1 } },
   { name: "分开凭据不完整不回退旧值", spec: { store: { [F.EMAIL]: "new@example.com", [F.ACCOUNT]: "old@example.com#old" } }, expect: { noRequests: true, title: "[AgentRouter] 签到失败" } },
-  { name: "单账号慢响应受90秒预算限制", spec: { store: accountStore, advance: 10000, responder: { get: warm }, postSeq: [jsonResp(503, {})] }, expect: { postCount: 7, content: ["时间预算已耗尽"], maxElapsed: 90000 } },
+  { name: "单账号慢响应受250秒预算限制", spec: { store: accountStore, advance: 10000, responder: { get: warm }, postSeq: [jsonResp(503, {})] }, expect: { postCount: 9, content: ["时间预算已耗尽"], maxElapsed: 260000 } },
   { name: "回调不返回 watchdog 停止不重试并done", runOnce: true, spec: { store: accountStore, watchdog: true, hangPost: true, responder: { get: warm } }, expect: { postCount: 1, done: true, content: ["回调超时"] } },
-  { name: "多账号共享110秒预算，剩余明确未执行", spec: { store: { [F.ACCOUNTS]: JSON.stringify(Array.from({ length: 3 }, (_, i) => ({ email: `a${i}@example.com`, password: "p" }))) }, advance: 10000, responder: { get: warm }, postSeq: [jsonResp(503, {})] }, expect: { content: ["整轮时间预算已耗尽，未执行"], maxElapsed: 110000 } },
+  { name: "多账号共享290秒预算，剩余明确未执行", spec: { store: { [F.ACCOUNTS]: JSON.stringify(Array.from({ length: 3 }, (_, i) => ({ email: `a${i}@example.com`, password: "p" }))) }, advance: 10000, responder: { get: warm }, postSeq: [jsonResp(503, {})] }, expect: { content: ["整轮时间预算已耗尽，未执行"], maxElapsed: 300000 } },
   { name: "Cookie 跨失败与成功合并，核验保留session", spec: {
     store: accountStore,
-    responder: { get: p => {
-      if (/\/login$/.test(p.url)) return { resp: { status: 200, headers: { 'Set-Cookie': ['acw_tc=old; Path=/', 'session=keep; Path=/'] } }, data: "<html>login</html>" };
+    responder: { get: (function () { let warms = 0; return p => {
+      if (/\/login$/.test(p.url)) {
+        warms++;
+        // 仅首次预热下发会话 cookie；后续刷新不再重发，验证 POST 后的 cookie 不被冲掉
+        if (warms > 1) return { resp: { status: 200, headers: {} }, data: "<html>login</html>" };
+        return { resp: { status: 200, headers: { 'Set-Cookie': ['acw_tc=old; Path=/', 'session=keep; Path=/'] } }, data: "<html>login</html>" };
+      }
       assert.strictEqual(p.headers.Cookie, "acw_tc=new; session=keep; auth=ok");
       return logResp([{ content: "签到成功", type: 4, created_at: nowSec() }]);
-    }, post: (p, s) => {
+    }; })(), post: (p, s) => {
       if (s.requests.filter(r => r.method === "post").length === 1) return jsonResp(503, {}, { 'Set-Cookie': 'acw_tc=new; Path=/' });
       assert.strictEqual(p.headers.Cookie, "acw_tc=new; session=keep");
       const r = loginOk(); r.resp.headers['Set-Cookie'] = 'auth=ok; Path=/'; return r;
@@ -652,7 +659,7 @@ function unitTests() {
     .replaceAll("https://cdn.jsdelivr.net/gh/cth123456/loon-scripts@main/", "https://raw.githubusercontent.com/cth123456/loon-scripts/main/");
   t.push(["两份插件功能完全一致", plugin === mirror]);
   t.push(["插件每天3/5/10 cron且无generic", /cron "0 3,5,10 \* \* \*"/.test(plugin) && !/generic /.test(plugin)]);
-  t.push(["插件与脚本版本1.5.1一致", checkin.SCRIPT_VERSION === "1.5.1" && plugin.includes("v1.5.1")]);
+  t.push(["插件与脚本版本1.5.2一致", checkin.SCRIPT_VERSION === "1.5.2" && plugin.includes("v1.5.2")]);
   t.push(["插件包含分开的中文输入", plugin.includes("#!input = " + F.EMAIL) && plugin.includes("#!input = " + F.PASSWORD)]);
   t.push(["Cookie同名更新保留其他值", checkin.mergeCookies("sid=1; waf=a", "waf=b; auth=x=y") === "sid=1; waf=b; auth=x=y"]);
   t.push(["Cookie Expires逗号不破坏分割", ec({ "set-cookie": "sid=1; Expires=Wed, 09 Jun 2027 10:18:14 GMT, waf=b; Path=/" }) === "sid=1; waf=b"]);
@@ -697,6 +704,10 @@ function checkExpect(c, threw) {
   if (exp.postCount !== undefined) {
     const posts = state.requests.filter((r) => r.method === "post").length;
     if (posts !== exp.postCount) problems.push(`POST 次数期望 ${exp.postCount} 实际 ${posts}`);
+  }
+  if (exp.getCount !== undefined) {
+    const gets = state.requests.filter((r) => r.method === "get").length;
+    if (gets !== exp.getCount) problems.push(`GET 次数期望 ${exp.getCount} 实际 ${gets}`);
   }
   if (exp.allRequestsNode) {
     const bad = state.requests.filter((r) => r.node !== exp.allRequestsNode);
