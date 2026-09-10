@@ -1,13 +1,14 @@
 #!name=AgentRouter 自动签到
-#!desc=v1.3.0 · agentrouter.org 每日自动签到：用账号密码完成一次登录即签到，并回查个人日志确认「签到成功」。安装后请在下方填入账号（单账号填 邮箱和密码 两项，用英文井号隔开；多账号填 多账号 JSON 数组）。签到默认每小时都会执行；想只在一天中的某几个时间点签到，就填「签到时间点」，例如 9 或 9,15,21。另外每周一会自动检查上游 Python 脚本是否有未移植的新提交并提醒。
+#!desc=v1.4.0 · agentrouter.org 每日自动签到：用账号密码完成一次登录即签到，并回查个人日志确认「签到成功」。安装后请在下方填入账号（单账号填 邮箱和密码 两项，用英文井号隔开；多账号填 多账号 JSON 数组）。签到默认每小时都会执行；想只在一天中的某几个时间点签到，就填「签到时间点」，例如 9 或 9,15,21。若提示需要人机验证，把「指定节点或策略组」填 DIRECT 直连即可。另外每周一会自动检查上游 Python 脚本是否有未移植的新提交并提醒。
 #!author=cth123456
 #!homepage=https://github.com/cth123456/loon-scripts
 #!icon=https://raw.githubusercontent.com/Koolson/Qure/master/IconSet/Color/Proxy.png
 #!input = 单账号[邮箱和密码]
 #!input = 多账号[JSON数组]
-#!input = 站点域名[可留空]
 #!input = 签到时间点[可留空]
+#!input = 指定节点或策略组[可留空]
+#!input = 站点域名[可留空]
 
 [Script]
-cron "0 * * * *" script-path=https://raw.githubusercontent.com/cth123456/loon-scripts/main/agentrouter-checkin.js, tag=AgentRouter签到, enable=true, timeout=60
+cron "0 * * * *" script-path=https://raw.githubusercontent.com/cth123456/loon-scripts/main/agentrouter-checkin.js, tag=AgentRouter签到, enable=true, timeout=120
 cron "0 10 * * 1" script-path=https://raw.githubusercontent.com/cth123456/loon-scripts/main/upstream-watch.js, tag=AgentRouter上游检查, enable=true, timeout=60

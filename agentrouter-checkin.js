@@ -36,7 +36,7 @@ const TIMEOUT = 20000;
 
 // 版本号：手动触发一次后，在 Loon 日志里看这行就能确认当前跑的是哪一版。
 // 更新脚本时同步递增，并同步更新 AgentRouter.checkin.plugin 的 #!desc。
-const SCRIPT_VERSION = "1.3.0";
+const SCRIPT_VERSION = "1.4.0";
 
 const DEFAULT_BASE_URL = "https://agentrouter.org";
 
@@ -49,6 +49,10 @@ const FIELD_BASE_URL = "站点域名[可留空]";
 // 可选：限定只在一天中的哪些小时真正执行（配合 `0 * * * *` 的每小时 cron 用）。
 // 例如 "9,15,21" 表示每天 9/15/21 点各签到一次；留空则每次触发都执行。
 const FIELD_RUN_HOURS = "签到时间点[可留空]";
+// 可选：指定这些请求走哪个节点/策略组（Loon $httpClient 的 node 参数）。
+// 站点挂在阿里云 WAF 后，若经由机房出口的代理节点访问，容易被判为机器人并弹人机验证；
+// 填 DIRECT 表示直连（不经代理），通常能避开；也可填你配置里的某个策略组名。
+const FIELD_NODE = "指定节点或策略组[可留空]";
 
 // 旧版（v1.1.0 及更早）的英文键名，继续兼容读取，并自动把值迁移到新键，
 // 这样老用户升级插件后不用重新填账号。
@@ -270,23 +274,29 @@ function request(method, params) {
 // 注意：显式关掉 Loon 的 auto-cookie，改用我们自己从 set-cookie 提取并回传的
 // Cookie（见 warmUp / extractCookies）。这样在旧版 Loon（auto-cookie 需 build
 // 662+）上行为一致，也不会出现两套 cookie 机制同时写入造成重复头。
-function httpGet(url, headers) {
-  return request("get", {
+// node 为可选：填了就让这些请求走指定节点/策略组（DIRECT=直连），用于避开
+// 机房出口 IP 触发的人机验证。
+function httpGet(url, headers, node) {
+  var p = {
     url: url,
     headers: headers || {},
     timeout: TIMEOUT,
     "auto-cookie": false
-  });
+  };
+  if (node) p.node = node;
+  return request("get", p);
 }
 
-function httpPostJson(url, headers, obj) {
-  return request("post", {
+function httpPostJson(url, headers, obj, node) {
+  var p = {
     url: url,
     headers: headers || {},
     body: JSON.stringify(obj),
     timeout: TIMEOUT,
     "auto-cookie": false
-  });
+  };
+  if (node) p.node = node;
+  return request("post", p);
 }
 
 function clip(s, n) {
@@ -298,6 +308,19 @@ function clip(s, n) {
 function htmlTitle(body) {
   var m = String(body || "").match(/<title[^>]*>([\s\S]*?)<\/title>/i);
   return m ? clip(m[1], 80) : "";
+}
+
+// 识别阿里云 WAF 的"人机验证"页（滑块/JS 挑战）。
+// 这种页面必须由浏览器执行脚本、人工拖动滑块才能通过，脚本无法自行解决，
+// 因此要单独识别出来并给出明确提示，而不是笼统报"返回 HTML"。
+function isCaptchaPage(body) {
+  var s = String(body || "");
+  return (
+    s.indexOf("aliyun_waf_aa") >= 0 ||
+    s.indexOf("aliyun_waf_bb") >= 0 ||
+    /aliyunCaptcha/i.test(s) ||
+    s.indexOf("nc-container") >= 0
+  );
 }
 
 function loginHeaders(base, cookie) {
@@ -335,7 +358,7 @@ function extractCookies(respHeaders) {
 
 // 先访问一次登录页，拿到 WAF 下发的 acw_tc cookie，并把它显式带回后续请求。
 // 目的是让 POST 看起来像同一次正常的浏览器会话（很多 WAF 要求先拿到 cookie）。
-async function warmUp(base) {
+async function warmUp(base, node) {
   var h = {};
   for (var k in BROWSER_HEADERS) h[k] = BROWSER_HEADERS[k];
   h.Accept = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
@@ -343,7 +366,7 @@ async function warmUp(base) {
   h["Sec-Fetch-Mode"] = "navigate";
   h["Sec-Fetch-Site"] = "none";
   try {
-    var r = await httpGet(base + "/login", h);
+    var r = await httpGet(base + "/login", h, node);
     var cookie = extractCookies(r.resp.headers);
     log("会话预热: GET /login -> HTTP " + r.resp.status + (cookie ? "，已取得 cookie" : ""));
     return cookie;
@@ -443,7 +466,7 @@ function makeResult(name, status, message, username, quota) {
   };
 }
 
-async function verifyCheckin(base, uid, cookie, slackNew, windowDays) {
+async function verifyCheckin(base, uid, cookie, node, slackNew, windowDays) {
   slackNew = slackNew || 300;
   windowDays = windowDays || 1;
   if (!uid) return { level: "error", detail: "缺少 uid, 跳过日志核验" };
@@ -459,7 +482,7 @@ async function verifyCheckin(base, uid, cookie, slackNew, windowDays) {
 
   var r;
   try {
-    r = await httpGet(url, headers);
+    r = await httpGet(url, headers, node);
   } catch (e) {
     return { level: "error", detail: "日志查询异常: " + e.message };
   }
@@ -499,7 +522,7 @@ async function verifyCheckin(base, uid, cookie, slackNew, windowDays) {
   return { level: "none", detail: "最近一条签到日志较旧（" + agoStr + "）" };
 }
 
-async function passwordLogin(base, acc) {
+async function passwordLogin(base, acc, node) {
   var name = acc.name || "默认账号";
   var email = (acc.email || "").trim();
   var password = (acc.password || "").trim();
@@ -507,16 +530,17 @@ async function passwordLogin(base, acc) {
 
   log("====== 开始处理账号(账号密码登录): " + name + " ======");
 
-  // 先预热会话拿 WAF cookie，再登录。失败分两类重试：
-  //   - 5xx（负载均衡/后端临时不可用，实测该站 ALB 会间歇性回 503）：退避后重试；
-  //   - 2xx/4xx 却是 HTML（多为 WAF 拦截页）：重新预热会话后重试。
-  var cookie = await warmUp(base);
+  // 先预热会话拿 WAF cookie，再登录。失败分三类处理：
+  //   - 5xx（负载均衡/后端临时不可用）：退避后重试；
+  //   - 人机验证页：脚本无法解决，立即失败（重试只会加重风控）；
+  //   - 其它 HTML（普通拦截页）：重新预热会话后重试。
+  var cookie = await warmUp(base, node);
 
   var MAX_ATTEMPTS = 3;
   var r, bodyText, isHtml;
   for (var attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      r = await httpPostJson(base + LOGIN_PATH, loginHeaders(base, cookie), { username: email, password: password });
+      r = await httpPostJson(base + LOGIN_PATH, loginHeaders(base, cookie), { username: email, password: password }, node);
     } catch (e) {
       return makeResult(name, "fail", "登录请求异常: " + e.message, null, null);
     }
@@ -526,6 +550,19 @@ async function passwordLogin(base, acc) {
     var status = r.resp.status;
     bodyText = typeof r.data === "string" ? r.data : "";
     isHtml = /text\/html/i.test(headerGet(r.resp.headers, "content-type")) || /^\s*</.test(bodyText.slice(0, 1));
+
+    // 人机验证页：脚本无法执行 JS / 拖滑块，直接明确失败并给出解法，不要浪费重试
+    if (isHtml && isCaptchaPage(bodyText)) {
+      log("检测到阿里云 WAF 人机验证页（HTTP " + status + "），脚本无法自行通过，停止重试");
+      return makeResult(
+        name,
+        "fail",
+        "站点要求人机验证(阿里云 WAF)。脚本无法自动通过；通常是当前出口 IP(代理/机房) 被风控，" +
+          "请在插件里把「" + FIELD_NODE + "」填成 DIRECT 直连，或换一个干净节点后重试",
+        null,
+        null
+      );
+    }
 
     // 5xx：服务端/负载均衡临时故障，与我们的请求无关，退避重试即可
     if (status >= 500) {
@@ -548,8 +585,8 @@ async function passwordLogin(base, acc) {
         " | 正文: " + clip(bodyText, 200)
     );
     if (attempt < MAX_ATTEMPTS) {
-      log("疑似被 WAF 拦截，重新预热会话后重试…");
-      cookie = await warmUp(base);
+      log("疑似被 WAF 拦截（非人机验证），重新预热会话后重试…");
+      cookie = await warmUp(base, node);
     }
   }
 
@@ -584,7 +621,7 @@ async function passwordLogin(base, acc) {
   var msg;
 
   if (checkedIn) {
-    var v = await verifyCheckin(base, uid, cookie);
+    var v = await verifyCheckin(base, uid, cookie, node);
     if (v.level === "new" || v.level === "today") {
       msg = "签到成功，日志已确认（" + v.detail + "）";
     } else {
@@ -624,10 +661,14 @@ async function main() {
     return;
   }
 
+  // 可选：把请求固定到某个节点/策略组，用于避开触发 WAF 人机验证的出口。
+  var node = readStore(FIELD_NODE).trim();
+  if (node) log("本次请求将走节点/策略组: " + node);
+
   var results = [];
   for (var i = 0; i < accounts.length; i++) {
     try {
-      var res = await passwordLogin(base, accounts[i]);
+      var res = await passwordLogin(base, accounts[i], node);
       if (res) results.push(res);
     } catch (e) {
       log("[" + (accounts[i].name || "?") + "] 处理异常: " + (e && e.message ? e.message : e));
@@ -690,12 +731,14 @@ if (typeof module !== "undefined" && module.exports) {
     readField: readField,
     clip: clip,
     htmlTitle: htmlTitle,
+    isCaptchaPage: isCaptchaPage,
     loginHeaders: loginHeaders,
     extractCookies: extractCookies,
     FIELD_ACCOUNT: FIELD_ACCOUNT,
     FIELD_ACCOUNTS: FIELD_ACCOUNTS,
     FIELD_BASE_URL: FIELD_BASE_URL,
     FIELD_RUN_HOURS: FIELD_RUN_HOURS,
+    FIELD_NODE: FIELD_NODE,
     normalizeAccountsArray: normalizeAccountsArray,
     collectAccounts: collectAccounts
   };

@@ -18,6 +18,7 @@ const F = {
   ACCOUNTS: checkin.FIELD_ACCOUNTS,
   BASE_URL: checkin.FIELD_BASE_URL,
   RUN_HOURS: checkin.FIELD_RUN_HOURS,
+  NODE: checkin.FIELD_NODE,
 };
 const state = { logs: [], notifications: [], done: false, requests: [], store: {} };
 let spec = {};
@@ -73,7 +74,7 @@ globalThis.$httpClient = {
 };
 
 function dispatch(method, params, cb) {
-  state.requests.push({ method, url: params.url, headers: params.headers, body: params.body });
+  state.requests.push({ method, url: params.url, headers: params.headers, body: params.body, node: params.node });
   const seq = method === "post" ? spec.postSeq : null;
   const handler = (spec.responder && spec.responder[method]) || null;
   realSetTimeout(() => {
@@ -217,6 +218,49 @@ const CHECKIN_CASES = [
       title: "[AgentRouter] 签到汇总",
       content: ["❌", "疑似被 WAF 拦截", "安全拦截", "正文片段"],
       logs: ["第 1 次登录返回 HTML", "第 3 次登录返回 HTML"],
+    },
+  },
+  {
+    name: "人机验证页：立即失败、给出 DIRECT 提示、不再重试",
+    spec: {
+      store: { [F.ACCOUNT]: "a@x.com#pwdA" },
+      responder: {
+        get: (p) =>
+          /\/login$/.test(p.url)
+            ? {
+                resp: { status: 200, headers: { "content-type": "text/html" } },
+                data: '<!doctype html><meta name="aliyun_waf_aa" content="x"><title></title>',
+              }
+            : { resp: { status: 200, headers: {} }, data: "" },
+        post: () => ({
+          resp: { status: 200, headers: { "content-type": "text/html; charset=utf-8" } },
+          data: '<!doctype html><meta charset="UTF-8"><meta name="aliyun_waf_aa" content="ff92"><meta name="aliyun_waf_bb" content="eade"><title></title>',
+        }),
+      },
+    },
+    expect: {
+      title: "[AgentRouter] 签到汇总",
+      content: ["❌", "人机验证", "DIRECT"],
+      logs: ["检测到阿里云 WAF 人机验证页", "停止重试"],
+      postCount: 1,
+    },
+  },
+  {
+    name: "指定节点：请求带上 node 参数",
+    spec: {
+      store: { [F.ACCOUNT]: "a@x.com#pwdA", [F.NODE]: "DIRECT" },
+      responder: {
+        get: (p) =>
+          /\/login$/.test(p.url)
+            ? { resp: { status: 200, headers: { "content-type": "text/html" } }, data: "<html>login</html>" }
+            : logResp([{ content: "签到成功", type: 4, created_at: nowSec() }]),
+        post: () => loginOk(),
+      },
+    },
+    expect: {
+      title: "[AgentRouter] 签到汇总",
+      logs: ["本次请求将走节点/策略组: DIRECT"],
+      allRequestsNode: "DIRECT",
     },
   },
   {
@@ -514,6 +558,15 @@ function unitTests() {
   t.push(["htmlTitle 抽取标题", checkin.htmlTitle("<html><title>安全拦截</title></html>") === "安全拦截"]);
   t.push(["htmlTitle 无标题 → 空", checkin.htmlTitle("<html>x</html>") === ""]);
 
+  const ic = checkin.isCaptchaPage;
+  t.push(["isCaptchaPage 命中 aliyun_waf_aa", ic('<meta name="aliyun_waf_aa" content="x">') === true]);
+  t.push(["isCaptchaPage 命中 aliyun_waf_bb", ic('<meta name="aliyun_waf_bb" content="x">') === true]);
+  t.push(["isCaptchaPage 命中 aliyunCaptcha", ic("AliyunCaptcha.js") === true]);
+  t.push(["isCaptchaPage 命中 nc-container", ic('<div class="nc-container">') === true]);
+  t.push(["isCaptchaPage 普通 HTML → false", ic("<html><body>hello</body></html>") === false]);
+  t.push(["isCaptchaPage JSON → false", ic('{"success":false}') === false]);
+  t.push(["isCaptchaPage 空 → false", ic("") === false]);
+
   const lh = checkin.loginHeaders("https://agentrouter.org");
   t.push(["loginHeaders 是 JSON 内容类型", lh["Content-Type"] === "application/json"]);
   t.push(["loginHeaders 带 Origin", lh.Origin === "https://agentrouter.org"]);
@@ -569,6 +622,14 @@ function checkExpect(c, threw) {
   if (exp.logs) for (const s of exp.logs) if (logsAll.indexOf(s) < 0) problems.push(`日志缺少「${s}」`);
   if (exp.done === true && state.done !== true) problems.push("未调用 $done()");
   if (exp.noRequests && state.requests.length) problems.push("不应发请求但发了 " + state.requests.length + " 个");
+  if (exp.postCount !== undefined) {
+    const posts = state.requests.filter((r) => r.method === "post").length;
+    if (posts !== exp.postCount) problems.push(`POST 次数期望 ${exp.postCount} 实际 ${posts}`);
+  }
+  if (exp.allRequestsNode) {
+    const bad = state.requests.filter((r) => r.node !== exp.allRequestsNode);
+    if (bad.length) problems.push(`${bad.length} 个请求没有带上 node=${exp.allRequestsNode}`);
+  }
   if (exp.storeHas) {
     for (const k of Object.keys(exp.storeHas)) {
       if (state.store[k] !== exp.storeHas[k]) problems.push(`存储键「${k}」期望「${exp.storeHas[k]}」实际「${state.store[k]}」`);
