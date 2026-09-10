@@ -31,6 +31,10 @@ const SELF_LOG_HEADER = "New-API-User";
 const CHECKIN_LOG_TYPE = 4;
 const TIMEOUT = 20000;
 
+// 版本号：手动触发一次后，在 Loon 日志里看这行就能确认当前跑的是哪一版。
+// 更新脚本时同步递增，并同步更新 AgentRouter.checkin.plugin 的 #!desc。
+const SCRIPT_VERSION = "1.0.0";
+
 const DEFAULT_BASE_URL = "https://agentrouter.org";
 
 const STORE_ACCOUNT = "AGENTROUTER_ACCOUNT";
@@ -397,7 +401,7 @@ async function passwordLogin(base, acc) {
 // ---------------------------------------------------------------- 主流程
 
 async function main() {
-  log("AgentRouter 自动签到启动 (Loon)");
+  log("AgentRouter 自动签到启动 (Loon) v" + SCRIPT_VERSION);
 
   var base = (readStore(STORE_BASE_URL) || DEFAULT_BASE_URL).trim().replace(/\/+$/, "");
   var guard = validateBaseUrl(base);
@@ -466,6 +470,7 @@ if (typeof module === "undefined" && typeof $done === "function" && typeof $http
 
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
+    SCRIPT_VERSION: SCRIPT_VERSION,
     main: main,
     runOnce: runOnce,
     validateBaseUrl: validateBaseUrl,

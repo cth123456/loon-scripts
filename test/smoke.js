@@ -228,6 +228,7 @@ function unitTests() {
   t.push(["humanAgo 天", script.humanAgo(90000) === "1 天前"]);
 
   t.push(["normalizeAccountsArray 丢弃不完整项", script.normalizeAccountsArray([{ account: "a@x.com#p" }, { account: "b@x.com" }]).length === 1]);
+  t.push(["SCRIPT_VERSION 已定义且为 x.y.z", typeof script.SCRIPT_VERSION === "string" && /^\d+\.\d+\.\d+$/.test(script.SCRIPT_VERSION)]);
   return t;
 }
 

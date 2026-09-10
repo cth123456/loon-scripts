@@ -76,10 +76,24 @@ cron "0 9 * * *" script-path=https://raw.githubusercontent.com/cth123456/loon-sc
 
 ```bash
 node --check agentrouter-checkin.js   # 语法检查
-node test/smoke.js                     # 37 项逻辑 + 安全性测试（stub 掉 Loon 运行时，不发真实请求）
+node test/smoke.js                     # 38 项逻辑 + 安全性测试（stub 掉 Loon 运行时，不发真实请求）
 ```
 
 `agentrouter-checkin.js` 在文件末尾判断了运行环境：在 Loon 中自动执行，被 Node `require` 时只导出函数，便于本地测试。
+
+### 更新机制（重要）
+
+脚本和插件都由 `main` 分支的 **raw 链接**提供，所以更新分两层：
+
+1. **脚本本体**：只要本仓库 `main` 分支的 `agentrouter-checkin.js` 有改动，Loon 下一次运行时拉到的就是新版——**不需要重装插件**。
+   不过 `raw.githubusercontent.com` 有约 **5 分钟** CDN 缓存（`cache-control: max-age=300`），刚推送后短时间内可能还拿到旧内容。
+2. **插件本体**：`AgentRouter.checkin.plugin`（定时时间、输入项、tag 等）若改动，需要在 Loon 里对这条插件做一次「更新」才会生效。
+
+**怎么确认当前跑的是哪一版**：脚本每次运行会在 Loon 日志里打印
+`AgentRouter 自动签到启动 (Loon) v<版本号>`；插件描述里也带同一个版本号。
+怀疑没更新时，手动触发一次脚本，看这行输出即可。
+
+> 说明：上面第 1、2 点基于 Loon 官方手册「远程 script-path 按 URL 拉取」与 GitHub raw 的实测缓存头（`max-age=300`）得出；Loon 客户端内具体是自动轮询还是需手动「更新」，官方没有公开文档，未在本机真机上实测。稳妥做法：更新插件后手动触发脚本一次，看版本号。
 
 ### 说明 / 与原版的差异
 

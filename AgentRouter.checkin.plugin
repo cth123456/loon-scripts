@@ -1,5 +1,5 @@
 #!name=AgentRouter 自动签到
-#!desc=agentrouter.org 每日自动签到：用账号密码完成一次登录即签到，并回查个人日志确认「签到成功」。安装后请在下方填入账号（AGENTROUTER_ACCOUNT=邮箱#密码；多账号用 AGENTROUTER_ACCOUNTS 填 JSON 数组）。默认每天 09:00 运行，重复运行不会重复发额度。
+#!desc=v1.0.0 · agentrouter.org 每日自动签到：用账号密码完成一次登录即签到，并回查个人日志确认「签到成功」。安装后请在下方填入账号（AGENTROUTER_ACCOUNT=邮箱#密码；多账号用 AGENTROUTER_ACCOUNTS 填 JSON 数组）。默认每天 09:00 运行，重复运行不会重复发额度。
 #!author=cth123456
 #!homepage=https://github.com/cth123456/loon-scripts
 #!icon=https://raw.githubusercontent.com/Koolson/Qure/master/IconSet/Color/Proxy.png
