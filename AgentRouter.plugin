@@ -1,0 +1,10 @@
+#!name=AgentRouter 自动签到
+#!desc=基于 ddgksf2013 的 agentrouter_checkin.js（github.com/ddgksf2013/Scripts）：账号密码登录即签到，含余额查询与日志核验，作者仓库更新自动同步。每天3、5、10点自动执行，点击运行按钮可立即执行。安装后填 AGENTROUTER_ACCOUNT = 邮箱#密码；多账号用 AGENTROUTER_ACCOUNTS 填 JSON 数组。若站点弹人机验证，请到浏览器完成一次验证后再试。
+#!author=ddgksf2013
+#!homepage=https://github.com/ddgksf2013/Scripts
+#!icon=https://raw.githubusercontent.com/Koolson/Qure/master/IconSet/Color/Proxy.png
+#!input = AGENTROUTER_ACCOUNT
+#!input = AGENTROUTER_ACCOUNTS
+
+[Script]
+cron "0 3,5,10 * * *" script-path=https://github.com/ddgksf2013/Scripts/raw/master/agentrouter_checkin.js, tag=AgentRouter签到, enable=true, timeout=120
