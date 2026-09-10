@@ -1,15 +1,21 @@
 /* eslint-disable */
 /**
- * 本地验证 agentrouter-checkin.js 的逻辑，不发起真实网络请求。
+ * 本地验证 loon 脚本逻辑，不发起真实网络请求。
  *
  * 做法：先给 Node 注入 Loon 运行时全局量（$httpClient / $persistentStore /
- * $notification / $done / $argument），再加载脚本体，逐个场景调用 main()。
- * 脚本在 Node 下不会自动执行（见文件末尾的 module 判断）。
+ * $notification / $done / $argument / Date），再加载脚本，逐个场景调用 main()。
+ * 脚本在 Node 下不会自动执行（见各文件末尾的 module 判断）。
  *
  * 运行： node test/smoke.js
  */
 const assert = require("assert");
-const script = require("../agentrouter-checkin.js");
+const checkin = require("../agentrouter-checkin.js");
+const watch = require("../upstream-watch.js");
+
+// ------------------------------------------------------------ mock 基础设施
+const state = { logs: [], notifications: [], done: false, requests: [], store: {} };
+let spec = {};
+const RealDate = Date;
 
 function jsonResp(status, obj, headers) {
   return {
@@ -27,15 +33,26 @@ function logResp(items) {
   return jsonResp(200, { success: true, data: { items: items || [] } });
 }
 function nowSec() {
-  return Math.floor(Date.now() / 1000);
+  return Math.floor(RealDate.now() / 1000);
+}
+function FakeDate(hour) {
+  return class extends RealDate {
+    constructor(...args) {
+      if (args.length) super(...args);
+      else super(1789000000000); // 固定时间戳，仅用 getHours 覆盖
+    }
+    getHours() {
+      return hour;
+    }
+  };
 }
 
-const state = { logs: [], notifications: [], done: false, requests: [] };
-let spec = {};
-
 globalThis.$persistentStore = {
-  read: (k) => (Object.prototype.hasOwnProperty.call(spec.store || {}, k) ? spec.store[k] : null),
-  write: () => true,
+  read: (k) => (Object.prototype.hasOwnProperty.call(state.store, k) ? state.store[k] : null),
+  write: (val, k) => {
+    state.store[k] = String(val);
+    return true;
+  },
 };
 globalThis.$notification = {
   post: (title, subtitle, content) => state.notifications.push({ title, subtitle, content }),
@@ -66,11 +83,14 @@ function reset(s) {
   state.notifications.length = 0;
   state.requests.length = 0;
   state.done = false;
+  state.store = Object.assign({}, s.store || {});
   if ("argument" in s) globalThis.$argument = s.argument;
   else delete globalThis.$argument;
+  globalThis.Date = "hour" in s ? FakeDate(s.hour) : RealDate;
 }
 
-const CASES = [
+// ============================================================ 签到脚本用例
+const CHECKIN_CASES = [
   {
     name: "happy path：登录成功 + 日志确认（new）",
     spec: {
@@ -159,6 +179,34 @@ const CASES = [
     expect: { title: "[AgentRouter] 签到失败", content: ["未检测到账号配置"] },
   },
   {
+    name: "时间次数：RUN_HOURS=9,15,21 且当前 10 点 → 跳过、不请求",
+    spec: { store: { AGENTROUTER_ACCOUNT: "a@x.com#pwdA", AGENTROUTER_RUN_HOURS: "9,15,21" }, hour: 10, responder: {} },
+    expect: { noNotify: true, logs: ["不在 AGENTROUTER_RUN_HOURS"], noRequests: true },
+  },
+  {
+    name: "时间次数：RUN_HOURS=9,15,21 且当前 15 点 → 执行",
+    spec: {
+      store: { AGENTROUTER_ACCOUNT: "a@x.com#pwdA", AGENTROUTER_RUN_HOURS: "9,15,21" },
+      hour: 15,
+      responder: { post: () => loginOk({ checked_in: false }) },
+    },
+    expect: { title: "[AgentRouter] 签到汇总", content: ["checked_in=false"] },
+  },
+  {
+    name: "时间次数：RUN_HOURS=9-11 区间，当前 10 点 → 执行",
+    spec: {
+      store: { AGENTROUTER_ACCOUNT: "a@x.com#pwdA", AGENTROUTER_RUN_HOURS: "9-11" },
+      hour: 10,
+      responder: { post: () => loginOk({ checked_in: false }) },
+    },
+    expect: { title: "[AgentRouter] 签到汇总", content: ["checked_in=false"] },
+  },
+  {
+    name: "时间次数：RUN_HOURS 留空 → 不做限制，每次触发都执行",
+    spec: { store: { AGENTROUTER_ACCOUNT: "a@x.com#pwdA", AGENTROUTER_RUN_HOURS: "" }, hour: 3, responder: { post: () => loginOk({ checked_in: false }) } },
+    expect: { title: "[AgentRouter] 签到汇总", content: ["checked_in=false"] },
+  },
+  {
     name: "安全性：127.0.0.1 被拒绝",
     spec: { store: { AGENTROUTER_ACCOUNT: "a@x.com#pwdA", AGENTROUTER_BASE_URL: "http://127.0.0.1:8080" }, responder: {} },
     expect: { title: "[AgentRouter] 签到失败", content: ["BASE_URL 不合法"] },
@@ -199,9 +247,85 @@ const CASES = [
   },
 ];
 
+// ============================================================ 上游检查用例
+const ATOM = (sha, msg, date) =>
+  '<?xml version="1.0" encoding="UTF-8"?>\n<feed xmlns="http://www.w3.org/2005/Atom">\n' +
+  "  <entry>\n" +
+  "    <id>tag:github.com,2008:Grit::Commit/" + sha + "</id>\n" +
+  '    <link type="text/html" rel="alternate" href="https://github.com/x/y/commit/' + sha + '"/>\n' +
+  "    <title>\n        " + msg + "\n    </title>\n" +
+  "    <updated>" + date + "</updated>\n" +
+  "  </entry>\n" +
+  "  <entry>\n" +
+  "    <id>tag:github.com,2008:Grit::Commit/older99</id>\n" +
+  "    <title>older commit</title>\n" +
+  "    <updated>2020-01-01T00:00:00Z</updated>\n" +
+  "  </entry>\n" +
+  "</feed>";
+const baselinePayload = (sha) => JSON.stringify({ ported_sha: sha });
+
+const WATCH_CASES = [
+  {
+    name: "上游与已移植版本一致 → 安静，不通知",
+    spec: {
+      responder: {
+        get: (p) => (p.url.indexOf(".atom") >= 0 ? { resp: { status: 200, headers: {} }, data: ATOM("aaaa1111", "m", "2026-01-01T00:00:00Z") } : { resp: { status: 200, headers: {} }, data: baselinePayload("aaaa1111") }),
+      },
+    },
+    expect: { noNotify: true, logs: ["已与上游对齐"] },
+  },
+  {
+    name: "上游有新提交 → 通知并包含对比链接",
+    spec: {
+      responder: {
+        get: (p) => (p.url.indexOf(".atom") >= 0 ? { resp: { status: 200, headers: {} }, data: ATOM("bbbb2222222222", "feat: 新功能", "2026-02-02T00:00:00Z") } : { resp: { status: 200, headers: {} }, data: baselinePayload("aaaa1111") }),
+      },
+    },
+    expect: {
+      title: "AgentRouter 上游脚本有更新",
+      content: ["bbbb2222", "feat: 新功能", "compare/aaaa1111...bbbb2222222222"],
+    },
+  },
+  {
+    name: "同一新提交第二次运行 → 去重，不再通知",
+    spec: {
+      store: { AGENTROUTER_UPSTREAM_NOTIFIED: "bbbb2222222222" },
+      responder: {
+        get: (p) => (p.url.indexOf(".atom") >= 0 ? { resp: { status: 200, headers: {} }, data: ATOM("bbbb2222222222", "feat: 新功能", "2026-02-02T00:00:00Z") } : { resp: { status: 200, headers: {} }, data: baselinePayload("aaaa1111") }),
+      },
+    },
+    expect: { noNotify: true, logs: ["此前已提醒过"] },
+  },
+  {
+    name: "baseline 读取失败 → 退回提示但不算失败",
+    spec: {
+      responder: {
+        get: (p) => (p.url.indexOf(".atom") >= 0 ? { resp: { status: 200, headers: {} }, data: ATOM("cccc3333", "fix", "2026-03-03T00:00:00Z") } : { resp: { status: 404, headers: {} }, data: "" }),
+      },
+    },
+    expect: { title: "AgentRouter 上游脚本有更新", content: ["无法确认我们已移植的版本"] },
+  },
+  {
+    name: "上游 feed 失败 → 发失败通知",
+    spec: { responder: { get: () => ({ resp: { status: 403, headers: {} }, data: "" }) } },
+    expect: { title: "AgentRouter 上游检查失败", content: ["HTTP 403"] },
+  },
+  {
+    name: "runOnce：运行时入口最终调用 $done()",
+    spec: {
+      responder: {
+        get: (p) => (p.url.indexOf(".atom") >= 0 ? { resp: { status: 200, headers: {} }, data: ATOM("aaaa1111", "m", "2026-01-01T00:00:00Z") } : { resp: { status: 200, headers: {} }, data: baselinePayload("aaaa1111") }),
+      },
+    },
+    runOnce: true,
+    expect: { done: true },
+  },
+];
+
+// ============================================================ 纯函数单测
 function unitTests() {
   const t = [];
-  const v = script.validateBaseUrl;
+  const v = checkin.validateBaseUrl;
   t.push(["默认公网 https 通过", v("https://agentrouter.org").ok === true]);
   t.push(["localhost 拒绝", v("http://localhost/x").ok === false]);
   t.push(["127.0.0.1 拒绝", v("http://127.0.0.1").ok === false]);
@@ -214,22 +338,85 @@ function unitTests() {
   t.push(["ftp 拒绝", v("ftp://x.com").ok === false]);
   t.push(["坏 URL 拒绝", v("not-a-url").ok === false]);
 
-  t.push(["parseAccount 邮箱#密码", JSON.stringify(script.parseAccount("a@x.com#p#w")) === JSON.stringify(["a@x.com", "p#w"])]);
-  t.push(["parseAccount 无密码", JSON.stringify(script.parseAccount("a@x.com")) === JSON.stringify(["a@x.com", ""])]);
+  t.push(["parseAccount 邮箱#密码", JSON.stringify(checkin.parseAccount("a@x.com#p#w")) === JSON.stringify(["a@x.com", "p#w"])]);
+  t.push(["parseAccount 无密码", JSON.stringify(checkin.parseAccount("a@x.com")) === JSON.stringify(["a@x.com", ""])]);
 
-  const q = script.extractQuota;
+  const q = checkin.extractQuota;
   t.push(["extractQuota quota", q({ quota: 5 }) === 5]);
   t.push(["extractQuota remainder_quota", q({ remainder_quota: 7 }) === 7]);
   t.push(["extractQuota balance", q({ balance: 9 }) === 9]);
   t.push(["extractQuota 无 → null", q({ x: 1 }) === null]);
 
-  t.push(["humanAgo 秒", script.humanAgo(30) === "30 秒前"]);
-  t.push(["humanAgo 分钟", script.humanAgo(120) === "2 分钟前"]);
-  t.push(["humanAgo 天", script.humanAgo(90000) === "1 天前"]);
+  t.push(["humanAgo 秒", checkin.humanAgo(30) === "30 秒前"]);
+  t.push(["humanAgo 分钟", checkin.humanAgo(120) === "2 分钟前"]);
+  t.push(["humanAgo 天", checkin.humanAgo(90000) === "1 天前"]);
 
-  t.push(["normalizeAccountsArray 丢弃不完整项", script.normalizeAccountsArray([{ account: "a@x.com#p" }, { account: "b@x.com" }]).length === 1]);
-  t.push(["SCRIPT_VERSION 已定义且为 x.y.z", typeof script.SCRIPT_VERSION === "string" && /^\d+\.\d+\.\d+$/.test(script.SCRIPT_VERSION)]);
+  t.push(["normalizeAccountsArray 丢弃不完整项", checkin.normalizeAccountsArray([{ account: "a@x.com#p" }, { account: "b@x.com" }]).length === 1]);
+  t.push(["checkin SCRIPT_VERSION 为 x.y.z", /^\d+\.\d+\.\d+$/.test(checkin.SCRIPT_VERSION)]);
+  t.push(["watch SCRIPT_VERSION 为 x.y.z", /^\d+\.\d+\.\d+$/.test(watch.SCRIPT_VERSION)]);
+
+  const ph = checkin.parseRunHours;
+  t.push(["parseRunHours 列表", JSON.stringify(ph("9,15,21")) === JSON.stringify([9, 15, 21])]);
+  t.push(["parseRunHours 区间", JSON.stringify(ph("9-11")) === JSON.stringify([9, 10, 11])]);
+  t.push(["parseRunHours 跨午夜", JSON.stringify(ph("22-2")) === JSON.stringify([22, 23, 0, 1, 2])]);
+  t.push(["parseRunHours 去重", JSON.stringify(ph("9,9,10")) === JSON.stringify([9, 10])]);
+  t.push(["parseRunHours 空格容错", JSON.stringify(ph(" 9 , 15 ")) === JSON.stringify([9, 15])]);
+  t.push(["parseRunHours 非法项忽略", JSON.stringify(ph("9,abc,99")) === JSON.stringify([9])]);
+  t.push(["parseRunHours 空字符串 → []", ph("").length === 0]);
+  t.push(["parseRunHours null → []", ph(null).length === 0]);
+  t.push(["shouldRunNow 空列表 → 总是执行", checkin.shouldRunNow([], 5) === true]);
+  t.push(["shouldRunNow 命中", checkin.shouldRunNow([9, 15], 15) === true]);
+  t.push(["shouldRunNow 未命中", checkin.shouldRunNow([9, 15], 12) === false]);
+
+  const pc = watch.parseLatestCommit;
+  t.push(["parseLatestCommit 取首条 entry 的 SHA", pc(ATOM("deadbeef1234", "msg here", "2026-05-05T00:00:00Z")).shortSha === "deadbeef"]);
+  t.push(["parseLatestCommit 取标题", pc(ATOM("deadbeef1234", "hello world", "2026-05-05")).message === "hello world"]);
+  t.push(["parseLatestCommit XML 实体解码", pc(ATOM("deadbeef1234", "a &amp; b &#39;c&#39;", "2026-05-05")).message === "a & b 'c'"]);
+  t.push(["parseLatestCommit 坏输入 → null", pc("{not xml") === null]);
+  t.push(["parseLatestCommit 空输入 → null", pc("") === null]);
+  t.push(["parsePortedSha 正常", watch.parsePortedSha(baselinePayload("abc")) === "abc"]);
+  t.push(["parsePortedSha 坏 JSON → 空", watch.parsePortedSha("{oops") === ""]);
+  t.push(["compareUrl 含 from/to", /compare\/aaa\.\.\.bbb/.test(watch.compareUrl("aaa", "bbb"))]);
+  t.push(["compareUrl 缺参数退回 commits 页", /\/commits\/main$/.test(watch.compareUrl("", "bbb"))]);
+
   return t;
+}
+
+// ============================================================ 执行
+async function runCase(c, mod, seclog) {
+  reset(c.spec);
+  const origLog = console.log;
+  console.log = (...a) => state.logs.push(a.map(String).join(" "));
+  let threw = null;
+  try {
+    if (c.runOnce) await mod.runOnce();
+    else await mod.main();
+  } catch (e) {
+    threw = e;
+  }
+  console.log = origLog;
+  return { threw };
+}
+
+function checkExpect(c, threw) {
+  const problems = [];
+  const exp = c.expect || {};
+  const logsAll = state.logs.join("\n");
+  const note = state.notifications[0];
+
+  if (threw) problems.push("抛异常：" + (threw.message || threw));
+  if (exp.noNotify && state.notifications.length) problems.push("不应发通知但发了：" + state.notifications[0].title);
+  if (exp.title) {
+    if (!note) problems.push("没有发出通知");
+    else if (note.title !== exp.title) problems.push(`通知标题不匹配：期望「${exp.title}」实际「${note.title}」`);
+  }
+  if (exp.content && note) {
+    for (const s of exp.content) if (String(note.content).indexOf(s) < 0) problems.push(`通知内容缺少「${s}」`);
+  }
+  if (exp.logs) for (const s of exp.logs) if (logsAll.indexOf(s) < 0) problems.push(`日志缺少「${s}」`);
+  if (exp.done === true && state.done !== true) problems.push("未调用 $done()");
+  if (exp.noRequests && state.requests.length) problems.push("不应发请求但发了 " + state.requests.length + " 个");
+  return problems;
 }
 
 (async function () {
@@ -248,45 +435,27 @@ function unitTests() {
     }
   }
 
-  origLog("\n== 端到端（stub Loon 运行时）==");
-  for (const c of CASES) {
-    reset(c.spec);
-    console.log = (...a) => state.logs.push(a.map(String).join(" "));
-    let threw = null;
-    try {
-      if (c.runOnce) await script.runOnce();
-      else await script.main();
-    } catch (e) {
-      threw = e;
-    }
-    console.log = origLog;
-
-    const problems = [];
-    const exp = c.expect || {};
-    const logsAll = state.logs.join("\n");
-    const note = state.notifications[0];
-
-    if (threw) problems.push("main() 抛异常：" + (threw.message || threw));
-    if (exp.title) {
-      if (!note) problems.push("没有发出通知");
-      else if (note.title !== exp.title) problems.push(`通知标题不匹配：期望「${exp.title}」实际「${note.title}」`);
-    }
-    if (exp.content && note) {
-      for (const s of exp.content) if (String(note.content).indexOf(s) < 0) problems.push(`通知内容缺少「${s}」`);
-    }
-    if (exp.logs) for (const s of exp.logs) if (logsAll.indexOf(s) < 0) problems.push(`日志缺少「${s}」`);
-    if (exp.done === true && state.done !== true) problems.push("未调用 $done()");
-
-    if (problems.length) {
-      fail++;
-      origLog("❌ " + c.name);
-      problems.forEach((p) => origLog("     - " + p));
-    } else {
-      pass++;
-      origLog("✅ " + c.name);
+  const suites = [
+    ["agentrouter-checkin.js", checkin, CHECKIN_CASES],
+    ["upstream-watch.js", watch, WATCH_CASES],
+  ];
+  for (const [label, mod, cases] of suites) {
+    origLog("\n== 端到端（stub Loon 运行时）· " + label + " ==");
+    for (const c of cases) {
+      const { threw } = await runCase(c, mod);
+      const problems = checkExpect(c, threw);
+      if (problems.length) {
+        fail++;
+        origLog("❌ " + c.name);
+        problems.forEach((p) => origLog("     - " + p));
+      } else {
+        pass++;
+        origLog("✅ " + c.name);
+      }
     }
   }
 
+  globalThis.Date = RealDate;
   origLog(`\n结果：${pass} 通过，${fail} 失败`);
   process.exit(fail ? 1 : 0);
 })();

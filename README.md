@@ -7,6 +7,7 @@
 | 脚本 | 说明 | 安装 |
 | --- | --- | --- |
 | `agentrouter-checkin.js` | [AgentRouter](https://agentrouter.org) 每日自动签到（账号密码登录即签到 + 日志核验） | [安装插件](https://raw.githubusercontent.com/cth123456/loon-scripts/main/AgentRouter.checkin.plugin) |
+| `upstream-watch.js` | 每周检查上游 Python 脚本是否有未移植的新提交并提醒 | 随上面的插件一起安装 |
 
 ---
 
@@ -45,6 +46,7 @@ https://raw.githubusercontent.com/cth123456/loon-scripts/main/AgentRouter.checki
 | `AGENTROUTER_ACCOUNT` | 单账号必填 | 格式 `邮箱#密码` |
 | `AGENTROUTER_ACCOUNTS` | 多账号可选 | JSON 数组，见下 |
 | `AGENTROUTER_BASE_URL` | 可选 | 覆盖站点域名，默认 `https://agentrouter.org` |
+| `AGENTROUTER_RUN_HOURS` | 可选 | 限定只在哪些小时真正签到，见「时间与次数」 |
 
 多账号示例（`AGENTROUTER_ACCOUNTS`）：
 
@@ -55,16 +57,68 @@ https://raw.githubusercontent.com/cth123456/loon-scripts/main/AgentRouter.checki
 也兼容旧格式：`[{"name":"甲","email":"a@x.com","password":"pwdA"}]`。
 设置了 `AGENTROUTER_ACCOUNTS` 时优先使用它。
 
+### 时间与次数（cron 自定义）
+
+签到任务的 cron 由插件写死为 **每小时整点**（`0 * * * *`），具体"每天几点签到、一天几次"由 `AGENTROUTER_RUN_HOURS` 决定：
+
+| `AGENTROUTER_RUN_HOURS` | 效果 |
+| --- | --- |
+| 留空 / 不填 | 每小时都签到（一天 24 次） |
+| `9` | 只在北京时间 09:00 签到（等于原来的每天一次） |
+| `9,15,21` | 每天 9 点、15 点、21 点各签到一次 |
+| `9-18` | 每天 9 点到 18 点之间的整点各一次 |
+| `22-2` | 支持跨午夜区间 |
+
+不在列表里的小时，脚本会直接跳过并发一行日志，不发通知、不发请求。
+注意：用的是 **Loon 运行设备上的本地时间**（通常就是北京时间）。
+
+**要改 cron 本身的节奏**（比如改成每 30 分钟、或隔天一次），就改插件里那行 `cron "0 * * * *"`：
+格式是 `分 时 日 月 周`（五段），`0 * * * *` 是每小时、`*/30 * * * *` 是每 30 分钟、`0 9 * * 1,3,5` 是每周一三五 9 点。
+
 **方式二：手动加定时脚本**
 
 在配置的 `[Script]` 段加入：
 
 ```ini
-cron "0 9 * * *" script-path=https://raw.githubusercontent.com/cth123456/loon-scripts/main/agentrouter-checkin.js, tag=AgentRouter签到, enable=true, timeout=60, argument = "邮箱#密码"
+cron "0 * * * *" script-path=https://raw.githubusercontent.com/cth123456/loon-scripts/main/agentrouter-checkin.js, tag=AgentRouter签到, enable=true, timeout=60, argument = "邮箱#密码"
+cron "0 10 * * 1" script-path=https://raw.githubusercontent.com/cth123456/loon-scripts/main/upstream-watch.js, tag=AgentRouter上游检查, enable=true, timeout=60
 ```
 
 `argument` 支持单个 `邮箱#密码`，也支持直接填账号 JSON 数组。
 优先级：`argument` > `AGENTROUTER_ACCOUNTS` > `AGENTROUTER_ACCOUNT`。
+只用 `argument` 时无法配置 `AGENTROUTER_RUN_HOURS`（那是插件输入项），需要限时请走插件方式。
+
+### 跟随上游 Python 更新
+
+上游 `agentrouter_checkin.py` 是用 Python 写的，Loon 只能跑 JavaScript，**没有办法直接执行或自动翻译它**。所以"跟随更新"做成了带提醒的半自动流程：
+
+1. `upstream-watch.js` 每周一 10:00 检查上游有没有新提交；
+2. 一旦发现我们还没移植的提交，就发一条 iOS 通知，带上提交信息、时间、以及和当前版本的**对比链接**；
+3. 你按下面的「重新移植」步骤把改动搬进 JS；
+4. 改完更新 `upstream-baseline.json` 的 `ported_sha`，下个周期自动对齐，不再重复提醒。
+
+**判定基准**是 `upstream-baseline.json` 的 `ported_sha`——记录我们已移植到哪个上游提交。当前基准：`88d5f1e`（2026-08-04）。
+
+**重新移植步骤**：
+
+```bash
+# 1. 看上游改了什么
+#    打开通知里的 compare 链接，或本地：
+git clone https://github.com/773075692/agentrouter-checkin /tmp/ar-upstream
+cd /tmp/ar-upstream && git log --oneline -5
+
+# 2. 把改动搬进 agentrouter-checkin.js（改逻辑、接口路径、字段名等）
+
+# 3. 更新基准，把 ported_sha 换成上游最新提交的完整 SHA
+#    取 SHA：git -C /tmp/ar-upstream rev-parse HEAD
+
+# 4. 递增 agentrouter-checkin.js 的 SCRIPT_VERSION、跑测试、提交推送
+cd /Users/mac/Documents/Codex/loon-scripts
+node test/smoke.js
+git add -A && git commit -m "port upstream <short-sha>" && git push
+```
+
+检查脚本用的是 GitHub 的 commits **Atom feed**（`github.com/<repo>/commits/main/agentrouter_checkin.py.atom`），而不是 REST API——因为未认证的 REST API 按 IP 限速（共享出口/VPN 很容易 403），Atom feed 没有这个限制。
 
 ### 安全说明
 
@@ -76,10 +130,11 @@ cron "0 9 * * *" script-path=https://raw.githubusercontent.com/cth123456/loon-sc
 
 ```bash
 node --check agentrouter-checkin.js   # 语法检查
-node test/smoke.js                     # 38 项逻辑 + 安全性测试（stub 掉 Loon 运行时，不发真实请求）
+node --check upstream-watch.js
+node test/smoke.js                     # 69 项逻辑 + 安全性 + 时间控制测试（stub 掉 Loon 运行时，不发真实请求）
 ```
 
-`agentrouter-checkin.js` 在文件末尾判断了运行环境：在 Loon 中自动执行，被 Node `require` 时只导出函数，便于本地测试。
+两个脚本都在文件末尾判断了运行环境：在 Loon 中自动执行，被 Node `require` 时只导出函数，便于本地测试。
 
 ### 更新机制（重要）
 

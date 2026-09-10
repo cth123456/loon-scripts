@@ -33,13 +33,16 @@ const TIMEOUT = 20000;
 
 // 版本号：手动触发一次后，在 Loon 日志里看这行就能确认当前跑的是哪一版。
 // 更新脚本时同步递增，并同步更新 AgentRouter.checkin.plugin 的 #!desc。
-const SCRIPT_VERSION = "1.0.0";
+const SCRIPT_VERSION = "1.1.0";
 
 const DEFAULT_BASE_URL = "https://agentrouter.org";
 
 const STORE_ACCOUNT = "AGENTROUTER_ACCOUNT";
 const STORE_ACCOUNTS = "AGENTROUTER_ACCOUNTS";
 const STORE_BASE_URL = "AGENTROUTER_BASE_URL";
+// 可选：限定只在一天中的哪些小时真正执行（配合 `0 * * * *` 的每小时 cron 用）。
+// 例如 "9,15,21" 表示每天 9/15/21 点各签到一次；留空则每次触发都执行。
+const STORE_RUN_HOURS = "AGENTROUTER_RUN_HOURS";
 
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
@@ -115,6 +118,44 @@ function extractQuota(payload) {
     }
   }
   return null;
+}
+
+// 解析 AGENTROUTER_RUN_HOURS："9,15,21" 或 "9-11"（也支持跨午夜 "22-2"）。
+// 返回 0-23 的整数数组；无法解析的片段忽略。返回空数组表示"不做小时限制"。
+function parseRunHours(raw) {
+  var found = [];
+  var parts = String(raw == null ? "" : raw).split(",");
+  for (var i = 0; i < parts.length; i++) {
+    var p = parts[i].trim();
+    if (!p) continue;
+    var m = p.match(/^(\d{1,2})\s*-\s*(\d{1,2})$/);
+    if (m) {
+      var a = parseInt(m[1], 10);
+      var b = parseInt(m[2], 10);
+      if (a > 23 || b > 23) continue;
+      if (a <= b) {
+        for (var h = a; h <= b; h++) found.push(h);
+      } else {
+        for (var h2 = a; h2 <= 23; h2++) found.push(h2);
+        for (var h3 = 0; h3 <= b; h3++) found.push(h3);
+      }
+      continue;
+    }
+    if (/^\d{1,2}$/.test(p)) {
+      var v = parseInt(p, 10);
+      if (v >= 0 && v <= 23) found.push(v);
+    }
+  }
+  var out = [];
+  for (var j = 0; j < found.length; j++) {
+    if (out.indexOf(found[j]) < 0) out.push(found[j]);
+  }
+  return out;
+}
+
+function shouldRunNow(hours, hour) {
+  if (!hours || !hours.length) return true;
+  return hours.indexOf(hour) >= 0;
 }
 
 // ------------------------------------------------- BASE_URL 安全校验
@@ -403,6 +444,15 @@ async function passwordLogin(base, acc) {
 async function main() {
   log("AgentRouter 自动签到启动 (Loon) v" + SCRIPT_VERSION);
 
+  var runHours = parseRunHours(readStore(STORE_RUN_HOURS));
+  if (runHours.length) {
+    var hour = new Date().getHours();
+    if (!shouldRunNow(runHours, hour)) {
+      log("当前 " + hour + " 点不在 AGENTROUTER_RUN_HOURS(" + runHours.join(",") + ") 内，本次跳过");
+      return;
+    }
+  }
+
   var base = (readStore(STORE_BASE_URL) || DEFAULT_BASE_URL).trim().replace(/\/+$/, "");
   var guard = validateBaseUrl(base);
   if (!guard.ok) {
@@ -478,6 +528,8 @@ if (typeof module !== "undefined" && module.exports) {
     parseAccount: parseAccount,
     extractQuota: extractQuota,
     humanAgo: humanAgo,
+    parseRunHours: parseRunHours,
+    shouldRunNow: shouldRunNow,
     normalizeAccountsArray: normalizeAccountsArray,
     collectAccounts: collectAccounts
   };

@@ -1,0 +1,12 @@
+{
+  "_comment": "记录我们已移植的上游提交。每次重新移植 agentrouter_checkin.py 后，把 ported_sha 更新为当时的上游最新提交 SHA；upstream-watch.js 会以此判断是否有未移植的新提交。",
+  "upstream_repo": "773075692/agentrouter-checkin",
+  "upstream_file": "agentrouter_checkin.py",
+  "upstream_branch": "main",
+  "ported_sha": "88d5f1e06c270c1e7bd46a79e0496ea0d0ec84c3",
+  "ported_sha_short": "88d5f1e",
+  "ported_at": "2026-09-10",
+  "ported_version": "1.0.0",
+  "upstream_commit_date": "2026-08-04T01:38:17Z",
+  "upstream_commit_message": "refactor: 移除 GitHub OAuth, 账号密码并入单一环境变量 AGENTROUTER_ACCOUNT(邮箱#密码)"
+}
