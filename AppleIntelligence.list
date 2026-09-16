@@ -1,0 +1,34 @@
+# NAME: Apple Intelligence / Siri (screenshot-based)
+# FORMAT: Loon Remote Rule; select the policy in Loon.
+# TOTAL: 17 (13 DOMAIN, 4 DOMAIN-SUFFIX)
+# Sources: https://support.apple.com/en-us/101555
+#          https://github.com/blackmatrix7/ios_rule_script/tree/master/rule/Loon/iCloudPrivateRelay
+# apple-dns uses .net; gspe1 contains digit 1, not lowercase L.
+# ls.apple.com also covers Maps/location; apps.mzstatic.com serves app assets.
+# Routing only: no MITM, scripts, rewrites, or guarantee of feature availability.
+
+# Siri
+DOMAIN,guzzoni.apple.com
+
+# iCloud Private Relay / Apple DNS
+DOMAIN,mask-api.fe.apple-dns.net
+DOMAIN,mask-api.icloud.com
+DOMAIN,mask-t.apple-dns.net
+DOMAIN,mask.apple-dns.net
+
+# Apple Intelligence / Private Cloud Compute
+DOMAIN,apple-relay.apple.com
+DOMAIN,apple-relay.cloudflare.com
+DOMAIN,apple-relay.fastly-edge.com
+DOMAIN,apple-relay.mask.apple-dns.net
+DOMAIN,cp4.cloudflare.com
+
+# Other endpoints included in the screenshot
+DOMAIN,gateway.icloud.com
+# Kept explicitly for comparison; also covered by ls.apple.com below.
+DOMAIN,gspe1-ssl.ls.apple.com
+DOMAIN-SUFFIX,ls.apple.com
+DOMAIN-SUFFIX,mask-h2.icloud.com
+DOMAIN-SUFFIX,mask.icloud.com
+DOMAIN-SUFFIX,smoot.apple.com
+DOMAIN,apps.mzstatic.com
