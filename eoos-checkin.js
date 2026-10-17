@@ -4,29 +4,32 @@
  * 站点：https://eoos.top
  *
  * 接口流程（从站点前端 UserDashboard 模块还原）：
- *   1. GET  /api/checkin/status   读取今天是否已签到
- *   2. POST /api/cap/challenge    获取签到人机验证挑战（Cap 工作量证明）
- *   3. POST /api/cap/redeem       提交解答，换取 verificationToken
- *   4. POST /api/checkin          正式签到
+ *   1. POST /api/auth/login        用账号密码换 token（登录未开启人机验证）
+ *   2. GET  /api/checkin/status    读取今天是否已签到
+ *   3. POST /api/cap/challenge     获取签到人机验证挑战（Cap 工作量证明）
+ *   4. POST /api/cap/redeem        提交解答，换取 verificationToken
+ *   5. POST /api/checkin           正式签到
  *
- * 使用：通过同仓库的 EOOS.plugin 安装，在 Loon 插件配置里填写 EOOS_TOKEN。
- * EOOS_TOKEN 是网页登录后的 auth_token，只保存在 Loon 本地，不会上传到本仓库。
+ * 令牌：首次运行用账号密码登录，token 存入 Loon 本地键 eoos_token；
+ *       之后优先复用缓存，接口返回 401 时自动重新登录，不需要手动抓 token。
  *
- * 可选：脚本顶部 TOKEN / USERNAME / PASSWORD 也可直接填写（不建议提交修改后的版本）。
+ * 定时：插件使用每小时唤起的 cron，按「签到时间点[可留空]」在设备本地小时过滤；
+ *       留空则每小时执行。独立 generic 入口是手动运行，绕过小时过滤。
+ *
  * 签到验证是 SHA-256 前缀工作量证明，不是图片验证码；timeout 建议 120 秒。
  */
 
 var BASE = "https://eoos.top";
+var SCRIPT_VERSION = "1.0.0";
 var UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
 
-// ======== 可选：只在本机填写，推荐留空用抓取模式 ========
-var TOKEN = "";      // 网页登录后的 auth_token
-var USERNAME = "";   // 账号或邮箱（仅在没有 TOKEN 时使用）
-var PASSWORD = "";   // 密码
-// =======================================================
-
+var FIELD_USER = "单账号[用户名或邮箱]";
+var FIELD_PASS = "单账号[密码]";
+var FIELD_HOURS = "签到时间点[可留空]";
+var FIELD_TOKEN = "EOOS_TOKEN";
 var TOKEN_KEY = "eoos_token";
-var INPUT_KEY = "EOOS_TOKEN";
+var LEGACY_USER = "EOOS_USERNAME";
+var LEGACY_PASS = "EOOS_PASSWORD";
 
 // ---------------- SHA-256（单块，消息 < 56 字节） ----------------
 var K256 = new Int32Array([
@@ -119,52 +122,66 @@ function solveOne(salt, targetHex) {
   }
 }
 
-// ---------------- 基础工具 ----------------
-function parse(str) { try { return JSON.parse(str); } catch (e) { return null; } }
-
-function storeRead(key) {
-  try { return (typeof $persistentStore !== "undefined" && $persistentStore.read(key)) || ""; } catch (e) { return ""; }
-}
-function storeWrite(key, value) {
-  try { if (typeof $persistentStore !== "undefined") $persistentStore.write(value, key); } catch (e) {}
-}
-
-function headerValue(headers, name) {
-  if (!headers) return "";
-  var lower = name.toLowerCase();
-  for (var k in headers) {
-    if (k.toLowerCase() === lower) return headers[k];
-  }
+// ---------------- 配置与时间 ----------------
+function readField(key, legacy) {
+  try {
+    if (typeof $persistentStore === "undefined") return "";
+    var v = $persistentStore.read(key);
+    if (v != null && String(v).trim() !== "") return String(v).trim();
+    if (legacy) {
+      var old = $persistentStore.read(legacy);
+      if (old != null && String(old).trim() !== "") return String(old).trim();
+    }
+  } catch (e) {}
   return "";
 }
 
-// ---------------- 抓取模式：从页面请求里拿 token ----------------
-if (typeof $request !== "undefined") {
-  try {
-    var auth = headerValue($request.headers, "Authorization");
-    var m = /^Bearer\s+(.+)$/i.exec(auth || "");
-    if (m && m[1]) {
-      var fresh = m[1].trim();
-      var had = storeRead(TOKEN_KEY);
-      storeWrite(INPUT_KEY, fresh);
-      storeWrite(TOKEN_KEY, fresh);
-      console.log("[EOOS] 已抓取登录令牌，长度 " + fresh.length + (had === fresh ? "（未变化）" : "（已更新）"));
+function writeField(key, value) {
+  try { if (typeof $persistentStore !== "undefined") $persistentStore.write(value, key); } catch (e) {}
+}
+
+function getArgument() {
+  try { return (typeof $argument !== "undefined" && $argument) ? String($argument).trim() : ""; } catch (e) { return ""; }
+}
+
+// "9,15,21" / "9-11" / 跨午夜 "22-2"；非法片段忽略；空数组表示不限制小时。
+function parseRunHours(raw) {
+  var found = [], parts = String(raw == null ? "" : raw).split(",");
+  for (var i = 0; i < parts.length; i++) {
+    var p = parts[i].trim();
+    if (!p) continue;
+    var m = p.match(/^(\d{1,2})\s*-\s*(\d{1,2})$/);
+    if (m) {
+      var a = parseInt(m[1], 10), b = parseInt(m[2], 10);
+      if (a > 23 || b > 23) continue;
+      if (a <= b) { for (var h = a; h <= b; h++) found.push(h); }
+      else {
+        for (var h2 = a; h2 <= 23; h2++) found.push(h2);
+        for (var h3 = 0; h3 <= b; h3++) found.push(h3);
+      }
+      continue;
     }
-  } catch (e) {}
-  $done({});
-} else {
-  main();
+    if (/^\d{1,2}$/.test(p)) {
+      var v = parseInt(p, 10);
+      if (v >= 0 && v <= 23) found.push(v);
+    }
+  }
+  var out = [];
+  for (var j = 0; j < found.length; j++) if (out.indexOf(found[j]) < 0) out.push(found[j]);
+  return out;
 }
 
 // ---------------- HTTP ----------------
 function http(method, path, body, token, cb) {
   var opt = {
     url: BASE + path,
+    timeout: 15000,
     headers: {
       "Origin": BASE,
       "Referer": BASE + "/dashboard",
       "User-Agent": UA,
-      "Accept": "application/json, text/plain, */*"
+      "Accept": "application/json, text/plain, */*",
+      "auto-cookie": false
     }
   };
   if (token) opt.headers["Authorization"] = "Bearer " + token;
@@ -175,47 +192,37 @@ function http(method, path, body, token, cb) {
   var fn = method === "GET" ? $httpClient.get : $httpClient.post;
   fn(opt, function (err, resp, data) {
     if (err) return cb(err);
-    cb(null, {
-      status: (resp && resp.status) || 0,
-      body: data != null ? data : ((resp && resp.body) || "")
-    });
+    cb(null, { status: (resp && resp.status) || 0, body: data != null ? data : ((resp && resp.body) || "") });
   });
 }
 
-function finish(title, subtitle, body) {
-  console.log("[EOOS] " + title + " | " + subtitle + " | " + body);
-  $notification.post("EOOS 签到 · " + title, subtitle || "", body || "");
+function parse(str) { try { return JSON.parse(str); } catch (e) { return null; } }
+
+function log(msg) { console.log("[EOOS] " + msg); }
+
+function finish(title, subtitle, body, silent) {
+  log(title + (subtitle ? " | " + subtitle : "") + (body ? " | " + body : ""));
+  if (!silent) {
+    try { $notification.post("EOOS 签到 · " + title, subtitle || "", body || ""); } catch (e) {}
+  }
   $done();
 }
 
-// ---------------- 登录（兜底） ----------------
-function readArgument() {
-  try { return (typeof $argument !== "undefined" && $argument) ? parse(String($argument)) : null; } catch (e) { return null; }
-}
-
+// ---------------- 登录 ----------------
 function login(cb) {
-  if (!USERNAME || !PASSWORD) return cb("没有保存的令牌，且未配置账号密码");
-  http("POST", "/api/auth/login", { userName: USERNAME, password: PASSWORD }, null, function (err, resp) {
+  var user = readField(FIELD_USER, LEGACY_USER);
+  var pass = readField(FIELD_PASS, LEGACY_PASS);
+  if (!user || !pass) return cb("未配置账号：请在插件里填写「单账号[用户名或邮箱]」和「单账号[密码]」");
+  http("POST", "/api/auth/login", { userName: user, password: pass }, null, function (err, resp) {
     if (err) return cb("登录请求失败：" + err);
     var out = parse(resp.body);
     if (out && out.token) {
-      storeWrite(INPUT_KEY, out.token);
-      storeWrite(TOKEN_KEY, out.token);
+      writeField(TOKEN_KEY, out.token);
+      log("登录成功，已缓存令牌");
       return cb(null, out.token);
     }
     cb("登录失败：" + ((out && out.message) || ("HTTP " + resp.status)));
   });
-}
-
-function resolveToken(cb) {
-  var arg = readArgument();
-  var token = TOKEN || (arg && arg.token) || storeRead(INPUT_KEY) || storeRead(TOKEN_KEY);
-  if (token) return cb(null, token);
-  if (arg && arg.username && arg.password) {
-    USERNAME = arg.username;
-    PASSWORD = arg.password;
-  }
-  login(cb);
 }
 
 // ---------------- 签到 ----------------
@@ -242,18 +249,17 @@ function solveCap(token, cb) {
   });
 }
 
-function checkin(token, retried, cb) {
+function runCheckin(token, retried, cb) {
   http("GET", "/api/checkin/status", null, token, function (err, resp) {
     if (err) return cb("查询失败：" + err);
 
     if (resp.status === 401) {
-      if (!retried && (USERNAME && PASSWORD)) {
-        return login(function (lerr, newToken) {
-          if (lerr) return cb(lerr);
-          checkin(newToken, true, cb);
-        });
-      }
-      return cb("令牌已失效，请在浏览器重新打开 eoos.top 让脚本自动抓取");
+      if (retried) return cb("登录已失效，且账号密码未配置或登录失败");
+      log("缓存的令牌已失效，重新登录");
+      return login(function (lerr, fresh) {
+        if (lerr) return cb(lerr);
+        runCheckin(fresh, true, cb);
+      });
     }
 
     var st = parse(resp.body);
@@ -281,13 +287,35 @@ function checkin(token, retried, cb) {
   });
 }
 
-// ---------------- 定时入口 ----------------
-function main() {
-  resolveToken(function (err, token) {
-    if (err) return finish("未就绪", err, "先在浏览器打开一次 eoos.top");
-    checkin(token, false, function (err2, title, detail) {
+// ---------------- 入口 ----------------
+(function main() {
+  log("启动 v" + SCRIPT_VERSION);
+
+  var manual = getArgument() === "manual";
+  var hours = parseRunHours(readField(FIELD_HOURS));
+  if (!manual && hours.length) {
+    var hour = new Date().getHours();
+    if (hours.indexOf(hour) < 0) {
+      return finish("跳过", "当前 " + hour + " 点不在签到时间点 " + hours.join(","), "", true);
+    }
+  }
+  log(manual ? "手动入口：绕过小时过滤" : "定时入口：小时过滤 " + (hours.length ? hours.join(",") : "未设置（每小时）"));
+
+  var cached = readField(TOKEN_KEY) || readField(FIELD_TOKEN);
+  if (cached) {
+    log("复用缓存令牌");
+    return runCheckin(cached, false, function (err, title, detail) {
+      if (err) return finish("执行失败", err, "");
+      finish(title, detail, "");
+    });
+  }
+
+  log("没有缓存令牌，使用账号密码登录");
+  login(function (err, token) {
+    if (err) return finish("未就绪", err, "");
+    runCheckin(token, false, function (err2, title, detail) {
       if (err2) return finish("执行失败", err2, "");
       finish(title, detail, "");
     });
   });
-}
+})();
