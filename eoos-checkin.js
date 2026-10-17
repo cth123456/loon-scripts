@@ -20,13 +20,14 @@
  */
 
 var BASE = "https://eoos.top";
-var SCRIPT_VERSION = "1.2.0";
+var SCRIPT_VERSION = "1.3.0";
 var UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
 
 var FIELD_USER = "单账号[用户名或邮箱]";
 var FIELD_PASS = "单账号[密码]";
 var FIELD_HOURS = "签到时间点[可留空]";
 var FIELD_NODE = "指定节点或策略组[可留空]";
+var FIELD_ALLOW_INSECURE = "允许跳过证书校验[留空=否]";
 var FIELD_TOKEN = "EOOS_TOKEN";
 var TOKEN_KEY = "eoos_token";
 var LEGACY_USER = "EOOS_USERNAME";
@@ -175,7 +176,7 @@ function parseRunHours(raw) {
 // ---------------- HTTP ----------------
 // 请求默认 DIRECT，避免代理节点或 MITM 造成的证书链问题；
 // 需要走代理时在插件里填「指定节点或策略组」。
-function http(method, path, body, token, node, cb) {
+function http(method, path, body, token, node, cb, insecure) {
   var opt = {
     url: BASE + path,
     timeout: 20000,
@@ -188,6 +189,7 @@ function http(method, path, body, token, node, cb) {
     }
   };
   if (node) opt.node = node;
+  if (insecure) { opt.insecure = true; opt["skip-cert-verify"] = true; }
   if (token) opt.headers["Authorization"] = "Bearer " + token;
   if (body != null) {
     opt.body = JSON.stringify(body);
@@ -205,47 +207,83 @@ function isTlsError(err) {
 }
 
 var usedNode = "";
+var insecureUsed = false;
+
+function allowInsecure() { return /^(1|true|yes|on|是|允许)$/i.test(readField(FIELD_ALLOW_INSECURE)); }
 function httpSafe(method, path, body, token, cb) {
   var configured = readField(FIELD_NODE) || "DIRECT";
-  usedNode = configured;
-  http(method, path, body, token, configured, function (err, resp) {
-    if (!err) return cb(null, resp);
-    if (!isTlsError(err) || configured.toUpperCase() === "DIRECT") {
-      return cb(err);
+  if (usedNode !== "DIRECT") usedNode = configured;
+
+  function attempt(node, insecure, next) {
+    http(method, path, body, token, node, function (err, resp) {
+      if (!err) return cb(null, resp);
+      if (!isTlsError(err)) return cb(err);
+      next(err);
+    }, insecure);
+  }
+
+  // 已经确认需要跳过校验时，后续请求直接沿用，避免每一步都重新失败。
+  if (insecureUsed) return attempt("DIRECT", true, function (err) { cb(err); });
+
+  attempt(configured, false, function (err1) {
+    if (configured.toUpperCase() !== "DIRECT") {
+      log("节点 " + configured + " TLS 校验失败，改用 DIRECT 重试");
+      usedNode = "DIRECT";
+      return attempt("DIRECT", false, function (err2) {
+        if (allowInsecure()) return goInsecure(err2);
+        cb(err2);
+      });
     }
-    // 配置的节点证书校验失败：改用 DIRECT 重试（仍然校验证书）。
-    log("节点 " + configured + " TLS 校验失败，改用 DIRECT 重试");
-    usedNode = "DIRECT";
-    http(method, path, body, token, "DIRECT", function (err2, resp2) {
-      if (err2) return cb(err2);
-      cb(null, resp2);
-    });
+    if (allowInsecure()) return goInsecure(err1);
+    cb(err1);
   });
+
+  function goInsecure(prevErr) {
+    log("证书校验失败且已允许跳过，使用 insecure 重试：" + String(prevErr).slice(0, 80));
+    insecureUsed = true;
+    attempt("DIRECT", true, function (err) { cb(err); });
+  }
 }
 
 // TLS 失败后判断是「仅本站」还是「Loon 全局信任链」问题；只读公开地址，不发送凭据。
 function diagnoseTls(err, cb) {
-  http("GET", "https://api.github.com/zen", null, null, "DIRECT", function (e, r) {
+  http("GET", "https://api.github.com/zen", null, null, "DIRECT", function (e) {
     var globalBroken = !!e;
-    cb({
-      globalBroken: globalBroken,
-      detail: globalBroken ? ("连 api.github.com 也失败：" + String(e).slice(0, 120)) : "其他 HTTPS 站点正常"
+    if (globalBroken) {
+      return cb({
+        globalBroken: true,
+        detail: "连 api.github.com 也失败：" + String(e).slice(0, 100)
+      });
+    }
+    // api.github.com 正常但 eoos.top 失败：再用同属 Google Trust Services 链的站点对照。
+    http("GET", "https://www.google.com/generate_204", null, null, "DIRECT", function (e2) {
+      cb({
+        globalBroken: false,
+        gtsBroken: !!e2,
+        detail: e2
+          ? "api.github.com 正常，但同为 Google Trust Services 链的 google.com 也失败：" + String(e2).slice(0, 100)
+          : "api.github.com 与 google.com 都正常，仅 eoos.top 失败"
+      });
     });
   });
 }
 
 function tlsNote() {
-  return usedNode === "DIRECT" && (readField(FIELD_NODE) || "DIRECT").toUpperCase() !== "DIRECT"
-    ? "；已改用 DIRECT"
-    : "";
+  var notes = [];
+  if (usedNode === "DIRECT" && (readField(FIELD_NODE) || "DIRECT").toUpperCase() !== "DIRECT") notes.push("已改用 DIRECT");
+  if (insecureUsed) notes.push("已跳过证书校验");
+  return notes.length ? "；" + notes.join("，") : "";
 }
 
 function tlsHint(info) {
   if (!info) return "";
   if (info.globalBroken) {
-    return "Loon 的 TLS 信任链异常（" + info.detail + "）。请更新 Loon，或在 Loon 中重新安装/信任证书。";
+    return "Loon 的脚本 HTTPS 请求整体不可用（" + info.detail + "）。请更新 Loon 后重试。";
   }
-  return "仅 eoos.top 校验失败（" + info.detail + "）。请检查 Loon 的 MITM 是否包含 eoos.top、Loon 根证书是否已信任，或把「指定节点或策略组」改为 DIRECT/其他可用节点。";
+  if (info.gtsBroken) {
+    return "同属 Google Trust Services 证书链的站点在 Loon 里也校验失败（" + info.detail + "），说明 Loon 内置根证书库可能缺少 GTS Root R4，而不是账号或脚本逻辑。请先更新 Loon；仍不行可在「" + FIELD_ALLOW_INSECURE + "」填 是 后重试。";
+  }
+  return "仅 eoos.top 失败（" + info.detail + "）。请检查 Loon 的 MITM 是否误拦 eoos.top，或先在「" + FIELD_ALLOW_INSECURE + "」填 是 后重试。";
 }
 
 function parse(str) { try { return JSON.parse(str); } catch (e) { return null; } }

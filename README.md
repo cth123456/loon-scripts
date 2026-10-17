@@ -50,6 +50,7 @@ https://raw.githubusercontent.com/cth123456/loon-scripts/main/EOOS.plugin
 | `单账号[密码]` | 站点密码，原样保存，支持首尾空格 |
 | `签到时间点[可留空]` | 如 `9`、`8,20`、`7-9`、`22-2`；留空则每小时执行 |
 | `指定节点或策略组[可留空]` | 默认 `DIRECT`；填写后走该节点，证书校验失败会自动退回 DIRECT |
+| `允许跳过证书校验[留空=否]` | 只有确认是 Loon 根证书库问题时才填 `是`；会不校验证书发送账号密码 |
 
 ### 定时与手动运行
 
@@ -61,6 +62,7 @@ https://raw.githubusercontent.com/cth123456/loon-scripts/main/EOOS.plugin
 
 - 签到验证是本地计算的 SHA-256 工作量证明（当前 18 组、4 位前缀），不是图片验证码；`timeout` 为 120 秒。
 - 请求默认 `DIRECT`，避免代理节点或 MITM 带来的证书链问题；确需走代理时填「指定节点或策略组」。
+- 若 DIRECT 仍报 `certificate verify failed`，先确认 Loon 版本，再考虑「允许跳过证书校验」；不要在不理解风险时开启。
 - 若出现 `certificate verify failed`：脚本会用 `api.github.com` 做对照探测，区分「Loon 全局信任链异常」和「仅本站失败」，并在通知里给出处理建议；不会跳过证书校验发送账号密码。
 - 仓库与脚本均不含任何账号、令牌或 Cookie；凭据只保存在 Loon 本地。
 - 系统休眠或后台调度可能影响实际执行，脚本不补跑错过的小时。
