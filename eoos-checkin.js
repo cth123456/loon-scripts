@@ -20,12 +20,13 @@
  */
 
 var BASE = "https://eoos.top";
-var SCRIPT_VERSION = "1.0.0";
+var SCRIPT_VERSION = "1.2.0";
 var UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
 
 var FIELD_USER = "单账号[用户名或邮箱]";
 var FIELD_PASS = "单账号[密码]";
 var FIELD_HOURS = "签到时间点[可留空]";
+var FIELD_NODE = "指定节点或策略组[可留空]";
 var FIELD_TOKEN = "EOOS_TOKEN";
 var TOKEN_KEY = "eoos_token";
 var LEGACY_USER = "EOOS_USERNAME";
@@ -172,18 +173,21 @@ function parseRunHours(raw) {
 }
 
 // ---------------- HTTP ----------------
-function http(method, path, body, token, cb) {
+// 请求默认 DIRECT，避免代理节点或 MITM 造成的证书链问题；
+// 需要走代理时在插件里填「指定节点或策略组」。
+function http(method, path, body, token, node, cb) {
   var opt = {
     url: BASE + path,
-    timeout: 15000,
+    timeout: 20000,
+    "auto-cookie": false,
     headers: {
       "Origin": BASE,
       "Referer": BASE + "/dashboard",
       "User-Agent": UA,
-      "Accept": "application/json, text/plain, */*",
-      "auto-cookie": false
+      "Accept": "application/json, text/plain, */*"
     }
   };
+  if (node) opt.node = node;
   if (token) opt.headers["Authorization"] = "Bearer " + token;
   if (body != null) {
     opt.body = JSON.stringify(body);
@@ -194,6 +198,54 @@ function http(method, path, body, token, cb) {
     if (err) return cb(err);
     cb(null, { status: (resp && resp.status) || 0, body: data != null ? data : ((resp && resp.body) || "") });
   });
+}
+
+function isTlsError(err) {
+  return /certificate verify failed|TLSError|SSL handshake|errSSL/i.test(String(err || ""));
+}
+
+var usedNode = "";
+function httpSafe(method, path, body, token, cb) {
+  var configured = readField(FIELD_NODE) || "DIRECT";
+  usedNode = configured;
+  http(method, path, body, token, configured, function (err, resp) {
+    if (!err) return cb(null, resp);
+    if (!isTlsError(err) || configured.toUpperCase() === "DIRECT") {
+      return cb(err);
+    }
+    // 配置的节点证书校验失败：改用 DIRECT 重试（仍然校验证书）。
+    log("节点 " + configured + " TLS 校验失败，改用 DIRECT 重试");
+    usedNode = "DIRECT";
+    http(method, path, body, token, "DIRECT", function (err2, resp2) {
+      if (err2) return cb(err2);
+      cb(null, resp2);
+    });
+  });
+}
+
+// TLS 失败后判断是「仅本站」还是「Loon 全局信任链」问题；只读公开地址，不发送凭据。
+function diagnoseTls(err, cb) {
+  http("GET", "https://api.github.com/zen", null, null, "DIRECT", function (e, r) {
+    var globalBroken = !!e;
+    cb({
+      globalBroken: globalBroken,
+      detail: globalBroken ? ("连 api.github.com 也失败：" + String(e).slice(0, 120)) : "其他 HTTPS 站点正常"
+    });
+  });
+}
+
+function tlsNote() {
+  return usedNode === "DIRECT" && (readField(FIELD_NODE) || "DIRECT").toUpperCase() !== "DIRECT"
+    ? "；已改用 DIRECT"
+    : "";
+}
+
+function tlsHint(info) {
+  if (!info) return "";
+  if (info.globalBroken) {
+    return "Loon 的 TLS 信任链异常（" + info.detail + "）。请更新 Loon，或在 Loon 中重新安装/信任证书。";
+  }
+  return "仅 eoos.top 校验失败（" + info.detail + "）。请检查 Loon 的 MITM 是否包含 eoos.top、Loon 根证书是否已信任，或把「指定节点或策略组」改为 DIRECT/其他可用节点。";
 }
 
 function parse(str) { try { return JSON.parse(str); } catch (e) { return null; } }
@@ -213,8 +265,11 @@ function login(cb) {
   var user = readField(FIELD_USER, LEGACY_USER);
   var pass = readField(FIELD_PASS, LEGACY_PASS);
   if (!user || !pass) return cb("未配置账号：请在插件里填写「单账号[用户名或邮箱]」和「单账号[密码]」");
-  http("POST", "/api/auth/login", { userName: user, password: pass }, null, function (err, resp) {
-    if (err) return cb("登录请求失败：" + err);
+  httpSafe("POST", "/api/auth/login", { userName: user, password: pass }, null, function (err, resp) {
+    if (err) {
+      if (!isTlsError(err)) return cb("登录请求失败：" + err);
+      return diagnoseTls(err, function (info) { cb("TLS 证书校验失败。" + tlsHint(info)); });
+    }
     var out = parse(resp.body);
     if (out && out.token) {
       writeField(TOKEN_KEY, out.token);
@@ -227,8 +282,11 @@ function login(cb) {
 
 // ---------------- 签到 ----------------
 function solveCap(token, cb) {
-  http("POST", "/api/cap/challenge", null, token, function (err, resp) {
-    if (err) return cb("请求挑战失败：" + err);
+  httpSafe("POST", "/api/cap/challenge", null, token, function (err, resp) {
+    if (err) {
+      if (!isTlsError(err)) return cb("请求挑战失败：" + err);
+      return diagnoseTls(err, function (info) { cb("TLS 证书校验失败。" + tlsHint(info)); });
+    }
     var data = parse(resp.body);
     if (!data || !data.token || !data.challenge) return cb("挑战返回异常：" + resp.body);
     var c = data.challenge.c, s = data.challenge.s, d = data.challenge.d;
@@ -240,8 +298,11 @@ function solveCap(token, cb) {
     } catch (e) {
       return cb("求解异常：" + e);
     }
-    http("POST", "/api/cap/redeem", { token: data.token, solutions: solutions }, token, function (e2, r2) {
-      if (e2) return cb("兑换请求失败：" + e2);
+    httpSafe("POST", "/api/cap/redeem", { token: data.token, solutions: solutions }, token, function (e2, r2) {
+      if (e2) {
+        if (!isTlsError(e2)) return cb("兑换请求失败：" + e2);
+        return diagnoseTls(e2, function (info) { cb("TLS 证书校验失败。" + tlsHint(info)); });
+      }
       var out = parse(r2.body);
       if (!out || !out.success || !out.token) return cb("兑换失败：" + ((out && out.message) || r2.body));
       cb(null, out.token);
@@ -250,8 +311,11 @@ function solveCap(token, cb) {
 }
 
 function runCheckin(token, retried, cb) {
-  http("GET", "/api/checkin/status", null, token, function (err, resp) {
-    if (err) return cb("查询失败：" + err);
+  httpSafe("GET", "/api/checkin/status", null, token, function (err, resp) {
+    if (err) {
+      if (!isTlsError(err)) return cb("查询失败：" + err);
+      return diagnoseTls(err, function (info) { cb("TLS 证书校验失败。" + tlsHint(info)); });
+    }
 
     if (resp.status === 401) {
       if (retried) return cb("登录已失效，且账号密码未配置或登录失败");
@@ -265,21 +329,24 @@ function runCheckin(token, retried, cb) {
     var st = parse(resp.body);
     if (!st || st.success !== true) return cb("状态异常：" + ((st && st.message) || resp.body));
     if (st.hasCheckedInToday) {
-      return cb(null, "今日已签到", "本次获得 " + (st.amount || 0) + " " + (st.currencyUnit || "RCoin"));
+      return cb(null, "今日已签到", "本次获得 " + (st.amount || 0) + " " + (st.currencyUnit || "RCoin") + tlsNote());
     }
 
     solveCap(token, function (capErr, verificationToken) {
       if (capErr) return cb(capErr);
-      http("POST", "/api/checkin", verificationToken ? { verificationToken: verificationToken } : {}, token, function (e3, r3) {
-        if (e3) return cb("签到请求失败：" + e3);
+      httpSafe("POST", "/api/checkin", verificationToken ? { verificationToken: verificationToken } : {}, token, function (e3, r3) {
+        if (e3) {
+          if (!isTlsError(e3)) return cb("签到请求失败：" + e3);
+          return diagnoseTls(e3, function (info) { cb("TLS 证书校验失败。" + tlsHint(info)); });
+        }
         var out = parse(r3.body);
         if (out && out.success) {
           var line = "本次获得 " + (out.amount || 0) + " " + (out.currencyUnit || "RCoin");
           if (out.balance != null) line += "，余额 " + out.balance;
-          return cb(null, "签到成功", line);
+          return cb(null, "签到成功", line + tlsNote());
         }
         if (r3.status === 400 && out && out.hasCheckedIn) {
-          return cb(null, "今日已签到", "本次获得 " + (out.amount || 0) + " " + (out.currencyUnit || "RCoin"));
+          return cb(null, "今日已签到", "本次获得 " + (out.amount || 0) + " " + (out.currencyUnit || "RCoin") + tlsNote());
         }
         cb("签到失败：HTTP " + r3.status + " " + ((out && out.message) || r3.body));
       });
