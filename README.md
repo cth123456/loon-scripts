@@ -34,6 +34,19 @@ https://raw.githubusercontent.com/cth123456/loon-scripts/main/AppleIntelligence.
 
 核对来源：[Apple 企业网络端点说明](https://support.apple.com/en-us/101555)、[blackmatrix7 的 Loon iCloudPrivateRelay 域名表](https://github.com/blackmatrix7/ios_rule_script/tree/master/rule/Loon/iCloudPrivateRelay)。本文件按截图独立整理，只参考公开域名事实，不复制上游脚本。
 
+## EOOS 每日签到插件
+
+脚本按 `eoos.top` 前端实际接口编写：查询签到状态 → Cap 工作量证明验证 → 提交签到。插件安装后在配置里填 `EOOS_TOKEN`（网页登录后的 `auth_token`），令牌只保存在 Loon 本地。
+
+```
+https://raw.githubusercontent.com/cth123456/loon-scripts/main/EOOS.plugin
+```
+
+- 默认每天 **08:07** 执行，可在插件里改。
+- 签到验证是本地计算的 SHA-256 工作量证明，不是图片验证码；`timeout` 为 120 秒。
+- 令牌失效会通知「令牌已失效」，重新登录网页并更新 `EOOS_TOKEN` 即可。
+- 仓库与脚本均不含任何账号、令牌或 Cookie。
+
 ## AgentRouter 自动签到插件
 
 脚本本体来自 **[ddgksf2013/Scripts](https://github.com/ddgksf2013/Scripts/blob/master/agentrouter_checkin.js)**（仓库里只保存插件包装，直接引用原作者脚本地址，作者更新自动同步）。原理：账号密码登录即签到，登录后回查个人日志确认，并查询账户余额。
