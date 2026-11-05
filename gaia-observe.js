@@ -1,6 +1,6 @@
 /* Loon observer/generic: report matches and forward network requests unchanged. */
 (function () {
-  var version = '1.1.0';
+  var version = '1.1.1';
   var endpoints = [
     'getAttendancePunchConfig', 'MatchOptimalLocationInfo',
     'getUserDetermineAddressIsInRestriction',

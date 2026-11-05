@@ -107,7 +107,7 @@ https://raw.githubusercontent.com/cth123456/loon-scripts/main/gaia-observe.js
 
 ### 使用范围
 
-插件覆盖当前已知的盖雅生产网关，并只对下方接口路径应用观测脚本：
+插件临时对盖雅相关的通配域名启用 HTTPS 解密，以发现手机端实际网关；脚本只对下方接口路径应用观测：
 
 ```text
 https://{known Gaia gateway}/*/api/v1/deviceCloud/app/...

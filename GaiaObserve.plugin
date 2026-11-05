@@ -1,5 +1,5 @@
 #!name=盖雅考勤请求观测
-#!desc=v1.1.0 · 只在命中考勤接口响应时通知，并在通知和日志中显示实际主机，不记录 Cookie、Bearer、经纬度、Base64 照片、租户或 imageKey；另含“盖雅观测自检”入口。请求全程原样转发。
+#!desc=v1.1.1 · 只在命中考勤接口响应时通知，并在通知和日志中显示实际主机，不记录 Cookie、Bearer、经纬度、Base64 照片、租户或 imageKey；另含“盖雅观测自检”入口。请求全程原样转发。
 #!author=cth123456
 #!homepage=https://github.com/cth123456/loon-scripts
 #!icon=https://raw.githubusercontent.com/Koolson/Qure/master/IconSet/Color/Proxy.png
@@ -10,4 +10,4 @@ http-response ^https://[^/]+/(?:[^?#]*/)?api/v1/deviceCloud/app/(getAttendancePu
 generic script-path=https://raw.githubusercontent.com/cth123456/loon-scripts/main/gaia-observe.js, tag=盖雅观测自检, timeout=10, argument=selftest, enable=true
 
 [MITM]
-hostname = gateway.gaiaworkforce.com, gateway-hw.gaiaworkforce.com, gateway-s-hw.gaiaworkforce.com, gateway-s.gaiaworkforce.com, gateway-pt.gaiaworkforce.com, gateway-sg.gaiaworkforce.com, gateway-sgs.gaiaworkforce.com, gateway.gaiacloud.com, gateway-s.gaiacloud.com, gateway-sg.gaiacloud.com, gateway-sgs.gaiacloud.com, gateway-pre.gaiaworks.cn
+hostname = *.gaiaworkforce.com, gaiaworkforce.com, *.gaiacloud.com, gaiacloud.com, *.gaiaworks.cn, gaiaworks.cn
