@@ -67,6 +67,46 @@ https://raw.githubusercontent.com/cth123456/loon-scripts/main/EOOS.plugin
 - 仓库与脚本均不含任何账号、令牌或 Cookie；凭据只保存在 Loon 本地。
 - 系统休眠或后台调度可能影响实际执行，脚本不补跑错过的小时。
 
+## 盖雅考勤请求观测插件
+
+这是诊断插件，本身不创建考勤，也不修改任何请求。它只观察盖雅 26.6.3 的考勤配置、位置匹配、考勤提交和照片上传路径，用于核对当前网关、调用顺序与响应结构；若 App 内发生正常提交，仍按原流程执行。
+
+Loon 中打开：
+
+```text
+https://raw.githubusercontent.com/cth123456/loon-scripts/main/GaiaObserve.plugin
+```
+
+脚本本体：
+
+```text
+https://raw.githubusercontent.com/cth123456/loon-scripts/main/gaia-observe.js
+```
+
+### 记录内容
+
+- 请求路径与 HTTP 状态。
+- `Authorization`、`Cookie`、`tenant`、`timestamp`、`app-nonce`、`sign` 等头是否存在。
+- `personId`、经纬度、设备字段、`imageFile`、`imageKey` 等字段是否存在。
+- 有限的 `successCode`、`deviceCheck`、`hasImageKey` 标志。
+
+### 不记录
+
+- 凭据和请求头的值。
+- URL 查询参数。
+- 经纬度、地址、租户和人员编号的值。
+- Base64 照片和 `imageKey` 的值。
+
+### 使用范围
+
+插件只对以下精确路径启用 HTTPS 解密：
+
+```text
+gateway.gaiaworkforce.com/devicecloud-mps/api/v1/deviceCloud/app/...
+```
+
+进入考勤页即可观察配置和位置请求。采集日志时应避免不必要的最终打卡；若确实提交，应使用本人可控账号并确认插件只输出脱敏结构。排查结束后关闭插件，避免长期解密共享网关流量。该插件不能替代服务端位置、设备、时间窗、签名或人脸活体验证。
+
 ## AgentRouter 自动签到插件
 
 脚本本体来自 **[ddgksf2013/Scripts](https://github.com/ddgksf2013/Scripts/blob/master/agentrouter_checkin.js)**（仓库里只保存插件包装，直接引用原作者脚本地址，作者更新自动同步）。原理：账号密码登录即签到，登录后回查个人日志确认，并查询账户余额。
