@@ -83,6 +83,13 @@ https://raw.githubusercontent.com/cth123456/loon-scripts/main/GaiaObserve.plugin
 https://raw.githubusercontent.com/cth123456/loon-scripts/main/gaia-observe.js
 ```
 
+### 先确认流量入口
+
+入口发现脚本会对盖雅域名报告实际主机和接口类别。自检成功但盖雅仍无通知时，依次运行「盖雅入口发现自检」和「盖雅接口观测自检」：
+
+- 入口发现自检成功、实际打开盖雅仍无「盖雅流量已进入 Loon」，通常是请求未经过 Loon、Root CA 未信任或 MITM 规则未重新加载。
+- 入口发现通知出现但没有考勤接口通知，说明请求已经进入 Loon，需要根据实际主机与接口类别调整精确规则。
+
 ### 记录内容
 
 - 请求路径与 HTTP 状态。
