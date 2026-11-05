@@ -1,12 +1,13 @@
 #!name=盖雅考勤请求观测
-#!desc=v1.0.0 · 只记录盖雅 26.6.3 考勤配置、位置匹配、考勤提交和照片上传请求的结构。日志仅含请求路径、存在的头名/字段名、HTTP 状态和有限成功标志，不记录 Cookie、Bearer、经纬度、Base64 照片、租户或 imageKey；请求全程原样转发。用完请在插件中关闭或删除。
+#!desc=v1.1.0 · 只在命中考勤接口响应时通知，并在通知和日志中显示实际主机，不记录 Cookie、Bearer、经纬度、Base64 照片、租户或 imageKey；另含“盖雅观测自检”入口。请求全程原样转发。
 #!author=cth123456
 #!homepage=https://github.com/cth123456/loon-scripts
 #!icon=https://raw.githubusercontent.com/Koolson/Qure/master/IconSet/Color/Proxy.png
 
 [Script]
-http-request ^https://gateway\.gaiaworkforce\.com/devicecloud-mps/api/v1/deviceCloud/app/(getAttendancePunchConfig|MatchOptimalLocationInfo|getUserDetermineAddressIsInRestriction|SubmitEmployeeAttendanceDataByMAP|uploadEmployeeAttendanceFile)(/|\?) script-path=https://raw.githubusercontent.com/cth123456/loon-scripts/main/gaia-observe.js, tag=盖雅请求诊断, requires-body=true, timeout=10, enable=true
-http-response ^https://gateway\.gaiaworkforce\.com/devicecloud-mps/api/v1/deviceCloud/app/(getAttendancePunchConfig|MatchOptimalLocationInfo|getUserDetermineAddressIsInRestriction|SubmitEmployeeAttendanceDataByMAP|uploadEmployeeAttendanceFile)(/|\?) script-path=https://raw.githubusercontent.com/cth123456/loon-scripts/main/gaia-observe.js, tag=盖雅响应诊断, requires-body=true, timeout=10, enable=true
+http-request ^https://[^/]+/(?:[^?#]*/)?api/v1/deviceCloud/app/(getAttendancePunchConfig|MatchOptimalLocationInfo|getUserDetermineAddressIsInRestriction|SubmitEmployeeAttendanceDataByMAP|uploadEmployeeAttendanceFile)(/|\?) script-path=https://raw.githubusercontent.com/cth123456/loon-scripts/main/gaia-observe.js, tag=盖雅请求诊断, requires-body=true, timeout=10, enable=true
+http-response ^https://[^/]+/(?:[^?#]*/)?api/v1/deviceCloud/app/(getAttendancePunchConfig|MatchOptimalLocationInfo|getUserDetermineAddressIsInRestriction|SubmitEmployeeAttendanceDataByMAP|uploadEmployeeAttendanceFile)(/|\?) script-path=https://raw.githubusercontent.com/cth123456/loon-scripts/main/gaia-observe.js, tag=盖雅响应诊断, requires-body=true, timeout=10, enable=true
+generic script-path=https://raw.githubusercontent.com/cth123456/loon-scripts/main/gaia-observe.js, tag=盖雅观测自检, timeout=10, argument=selftest, enable=true
 
 [MITM]
-hostname = gateway.gaiaworkforce.com
+hostname = gateway.gaiaworkforce.com, gateway-hw.gaiaworkforce.com, gateway-s-hw.gaiaworkforce.com, gateway-s.gaiaworkforce.com, gateway-pt.gaiaworkforce.com, gateway-sg.gaiaworkforce.com, gateway-sgs.gaiaworkforce.com, gateway.gaiacloud.com, gateway-s.gaiacloud.com, gateway-sg.gaiacloud.com, gateway-sgs.gaiacloud.com, gateway-pre.gaiaworks.cn

@@ -1,5 +1,6 @@
-/* Loon http-request/http-response: observe structure, forward unchanged. */
+/* Loon observer/generic: report matches and forward network requests unchanged. */
 (function () {
+  var version = '1.1.0';
   var endpoints = [
     'getAttendancePunchConfig', 'MatchOptimalLocationInfo',
     'getUserDetermineAddressIsInRestriction',
@@ -36,25 +37,45 @@
       deviceCheck: typeof obj.deviceCheck === 'boolean' ? obj.deviceCheck : null
     };
   }
+  function notify(title, subtitle, body) {
+    if (typeof $notification !== 'undefined') {
+      $notification.post(String(title), String(subtitle), String(body));
+    }
+  }
   try {
-    if (typeof $request === 'undefined') return;
+    if (typeof $request === 'undefined') {
+      notify('盖雅观测自检', '脚本已加载 v' + version, '若看到此通知，说明 Loon 已成功下载并运行脚本');
+      console.log('[GaiaObserve] self-test v' + version);
+      return;
+    }
     var path = String($request.url || '').split('?')[0];
     var match = /\/api\/v1\/deviceCloud\/app\/([^/]+)(?:\/|$)/.exec(path);
     var endpoint = match && match[1];
     if (endpoints.indexOf(endpoint) < 0) return;
+    var hostMatch = /^https?:\/\/([^/]+)/i.exec(String($request.url || ''));
+    var host = hostMatch ? hostMatch[1] : 'unknown-host';
     var responsePhase = typeof $response !== 'undefined';
-    var message = { phase: responsePhase ? 'response' : 'request', endpoint: endpoint };
+    var message = {
+      phase: responsePhase ? 'response' : 'request',
+      host: host,
+      endpoint: endpoint
+    };
     if (responsePhase) {
       var status = Number($response.status);
       message.httpStatus = status >= 100 && status <= 599 ? status : null;
       message.body = shape($response.body);
+      notify(
+        '盖雅观测已触发',
+        endpoint,
+        'HTTP ' + (message.httpStatus || 'unknown') + ' · ' + host
+      );
     } else {
       var headers = $request.headers || {};
       var names = Object.keys(headers).map(function (name) { return name.toLowerCase(); });
       message.presentHeaders = headerNames.filter(function (name) { return names.indexOf(name) >= 0; });
       message.body = shape($request.body);
     }
-    console.log('[GaiaObserve] ' + JSON.stringify(message));
+    console.log('[GaiaObserve v' + version + '] ' + JSON.stringify(message));
   } catch (_) {
     console.log('[GaiaObserve] diagnostic-error');
   } finally {

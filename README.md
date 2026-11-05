@@ -97,12 +97,20 @@ https://raw.githubusercontent.com/cth123456/loon-scripts/main/gaia-observe.js
 - 经纬度、地址、租户和人员编号的值。
 - Base64 照片和 `imageKey` 的值。
 
+### 先做自检
+
+安装或更新插件后，在 Loon 的插件操作中运行「盖雅观测自检」。看到「盖雅观测自检」通知，说明插件、远程脚本和通知链已经生效。
+
+随后进入盖雅考勤页并完成一次拍照。只记录考勤接口响应，触发时会显示接口名、HTTP 状态和实际命中的主机，不会显示 Cookie、Bearer、经纬度、照片或 `imageKey` 的值。
+
+如果自检没有通知，检查插件是否启用、远程脚本能否下载，并断开重连 Loon 让配置重新加载。如果自检成功但盖雅无通知，通常是实际网关不在 `[MITM]` 列表、HTTPS 解密/根证书未生效，或盖雅请求没有经过 Loon。
+
 ### 使用范围
 
-插件只对以下精确路径启用 HTTPS 解密：
+插件覆盖当前已知的盖雅生产网关，并只对下方接口路径应用观测脚本：
 
 ```text
-gateway.gaiaworkforce.com/devicecloud-mps/api/v1/deviceCloud/app/...
+https://{known Gaia gateway}/*/api/v1/deviceCloud/app/...
 ```
 
 进入考勤页即可观察配置和位置请求。采集日志时应避免不必要的最终打卡；若确实提交，应使用本人可控账号并确认插件只输出脱敏结构。排查结束后关闭插件，避免长期解密共享网关流量。该插件不能替代服务端位置、设备、时间窗、签名或人脸活体验证。
