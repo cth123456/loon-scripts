@@ -1,0 +1,10 @@
+#!name=盖雅打卡提醒
+#!desc=v1.0.0 · 每天 08:20 上班、18:00 下班发送本地提醒；只提醒，不自动打卡，不读取或重放任何 Cookie/Bearer/签名/位置/照片，不发起考勤请求。提醒依赖 Loon VPN 保持连接，时间可在插件配置中修改。
+#!author=cth123456
+#!homepage=https://github.com/cth123456/loon-scripts
+#!icon=https://raw.githubusercontent.com/Koolson/Qure/master/IconSet/Color/Proxy.png
+
+[Script]
+cron "20 8 * * *" script-path=https://raw.githubusercontent.com/cth123456/loon-scripts/gaia-reminder-v1.0.0/gaia-reminder.js, tag=盖雅上班打卡提醒, timeout=30, argument=clock-in, enable=true
+cron "0 18 * * *" script-path=https://raw.githubusercontent.com/cth123456/loon-scripts/gaia-reminder-v1.0.0/gaia-reminder.js, tag=盖雅下班打卡提醒, timeout=30, argument=clock-out, enable=true
+generic script-path=https://raw.githubusercontent.com/cth123456/loon-scripts/gaia-reminder-v1.0.0/gaia-reminder.js, tag=盖雅提醒自检, timeout=10, argument=selftest, enable=true
